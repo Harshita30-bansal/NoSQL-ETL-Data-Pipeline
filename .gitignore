@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Data files (very large)
+data/
+*.gz
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Runtime outputs
+logs/
+results/
