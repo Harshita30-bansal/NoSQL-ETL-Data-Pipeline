@@ -2,6 +2,8 @@
 
 Resume-grade NoSQL systems project based on the NASA HTTP logs, designed to run the same ETL + analytics workload across multiple backends (`Pig`, `MapReduce`, `MongoDB`, `Hive`) with fair comparison and common reporting.
 
+This project implements an end-to-end Big Data ETL pipeline workflow covering ingestion, transformation, distributed processing concepts, and NoSQL analytics.
+
 ---
 
 ## Current Status (Day 1 Completed)
@@ -175,4 +177,3 @@ The completed Day 1 work establishes that shared baseline.
 ## Author Notes
 
 This repository is being developed in iterative milestones (Day 1, Day 2, ...), with correctness-first implementation and reproducible test evidence at each stage.
-
