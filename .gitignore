@@ -19,3 +19,7 @@ Thumbs.db
 
 # Environment files
 .env
+
+# Large dataset
+data/*.gz
+data/NASA_access_log_*
