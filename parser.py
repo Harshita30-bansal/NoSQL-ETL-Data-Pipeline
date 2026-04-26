@@ -1,132 +1,113 @@
+"""
+parser.py – Shared log-line parser for NASA Combined Log Format.
+"""
+
 import re
 from datetime import datetime
 
-# Month abbreviation to number mapping
-MONTH_MAP = {
-    'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-    'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-    'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-}
-
-# Main regex pattern — matches a complete valid log line
-# Breakdown:
-#   (\S+)          → host
-#   \S+ \S+        → ident and auth (skip)
-#   \[(\d{2})/(\w{3})/(\d{4}):(\d{2}):\d{2}:\d{2} [^\]]+\]  → timestamp parts
-#   "([A-Z]+)?     → http method (optional)
-#   \s*(\S+)?      → resource path (optional)
-#   \s*(HTTP[^\s"]*)?"   → protocol version (optional)
-#   \s+(\d{3})     → status code
-#   \s+(\S+)       → bytes (number or dash)
-
+# ─── Regex ───────────────────────────────────────────────────────────────
 LOG_PATTERN = re.compile(
-    r'(\S+) \S+ \S+ '
-    r'\[(\d{2})/(\w{3})/(\d{4}):(\d{2}):\d{2}:\d{2} [^\]]+\] '
-    r'"([A-Z]+)? ?([^\s"]+)? ?(HTTP[^\s"]*)?" '
-    r'(\d{3}) (\S+)'
+    r'^(?P<host>\S+)'
+    r'\s+-\s+-\s+'
+    r'\[(?P<timestamp>[^\]]+)\]'
+    r'\s+"(?P<request>[^"]*)"'
+    r'\s+(?P<status>\d{3}|-)'
+    r'\s+(?P<bytes>\S+)'
 )
 
+REQUEST_PATTERN = re.compile(
+    r'^(?P<method>[A-Z]+)\s+(?P<path>\S+)(?:\s+(?P<protocol>HTTP/\S+))?$'
+)
 
-def parse_line(line):
-    """
-    Parse one raw log line.
+TIMESTAMP_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 
-    Returns a dict with all fields if successful.
-    Returns None if the line is malformed and cannot be parsed.
 
-    Never raises an exception — all errors are caught and return None.
-    """
+def parse_line(line: str):
     line = line.strip()
-
     if not line:
         return None
 
-    try:
-        match = LOG_PATTERN.match(line)
-
-        if not match:
-            # Line does not match expected format at all
-            return None
-
-        (host, day, month_str, year, hour,
-         method, resource, protocol,
-         status_str, bytes_str) = match.groups()
-
-        # Convert month abbreviation to number
-        month = MONTH_MAP.get(month_str)
-        if month is None:
-            return None  # Unknown month abbreviation
-
-        # Build log_date as a proper date string YYYY-MM-DD
-        log_date = f"{year}-{month}-{day.zfill(2)}"
-
-        # log_hour is just the integer hour (0–23)
-        log_hour = int(hour)
-
-        # Status code as integer
-        status_code = int(status_str)
-
-        # Bytes: dash means 0, otherwise parse as integer
-        if bytes_str == '-':
-            bytes_transferred = 0
-        else:
-            try:
-                bytes_transferred = int(bytes_str)
-            except ValueError:
-                bytes_transferred = 0  # Some lines have malformed bytes
-
-        # Return the fully parsed record as a dict
-        return {
-            'host':             host,
-            'log_date':         log_date,       # e.g. "1995-07-01"
-            'log_hour':         log_hour,        # e.g. 0
-            'http_method':      method,          # e.g. "GET" or None
-            'resource_path':    resource,        # e.g. "/history/apollo/"
-            'protocol_version': protocol,        # e.g. "HTTP/1.0" or None
-            'status_code':      status_code,     # e.g. 200
-            'bytes_transferred': bytes_transferred  # e.g. 6245
-        }
-
-    except Exception:
-        # Catch-all: anything unexpected means malformed
+    m = LOG_PATTERN.match(line)
+    if not m:
         return None
 
+    host = m.group("host")
+    ts_raw = m.group("timestamp")
+    request = m.group("request")
+    status = m.group("status")
+    bytes_raw = m.group("bytes")
 
-def parse_file_in_batches(filepath, batch_size):
-    """
-    Generator function that reads the log file and yields one batch at a time.
+    # timestamp
+    try:
+        dt = datetime.strptime(ts_raw, TIMESTAMP_FORMAT)
+        log_date = dt.strftime("%Y-%m-%d")
+        log_hour = dt.hour
+        timestamp_iso = dt.isoformat()
+    except ValueError:
+        return None
 
-    Each batch is a tuple: (batch_id, good_records, malformed_count)
-    - batch_id: integer starting from 1
-    - good_records: list of parsed dicts
-    - malformed_count: number of lines in this batch that failed parsing
-    """
+    # status
+    if status == "-":
+        return None
+    status_code = int(status)
+
+    # bytes
+    bytes_transferred = 0
+    if bytes_raw not in ("-", ""):
+        try:
+            bytes_transferred = int(bytes_raw)
+        except ValueError:
+            bytes_transferred = 0
+
+    # request parsing
+    rm = REQUEST_PATTERN.match(request.strip())
+    if rm:
+        http_method = rm.group("method")
+        resource_path = rm.group("path")
+        protocol_version = rm.group("protocol") or "UNKNOWN"
+    else:
+        http_method = "UNKNOWN"
+        resource_path = request or "/"
+        protocol_version = "UNKNOWN"
+
+    return {
+        "host": host,
+        "timestamp": timestamp_iso,
+        "log_date": log_date,
+        "log_hour": log_hour,
+        "http_method": http_method,
+        "resource_path": resource_path,
+        "protocol_version": protocol_version,
+        "status_code": status_code,
+        "bytes_transferred": bytes_transferred,
+    }
+
+
+# ─── MAIN BATCH FUNCTION (used by pipeline) ───────────────────────────────
+def parse_file_in_batches(filepath: str, batch_size: int):
     batch_id = 0
-    good_records = []
-    malformed_count = 0
-    records_in_current_batch = 0
+    batch_records = []
+    batch_malformed = 0
 
-    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            # Count this line toward the current batch regardless of parse result
-            records_in_current_batch += 1
-
-            parsed = parse_line(line)
-            if parsed is None:
-                malformed_count += 1
+    with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            record = parse_line(line)
+            if record is None:
+                batch_malformed += 1
             else:
-                good_records.append(parsed)
+                batch_records.append(record)
 
-            # When batch is full, yield it
-            if records_in_current_batch == batch_size:
+            if (len(batch_records) + batch_malformed) >= batch_size:
                 batch_id += 1
-                yield (batch_id, good_records, malformed_count)
-                # Reset for next batch
-                good_records = []
-                malformed_count = 0
-                records_in_current_batch = 0
+                yield batch_id, batch_records, batch_malformed
+                batch_records = []
+                batch_malformed = 0
 
-    # Yield the final partial batch if it has any lines
-    if records_in_current_batch > 0:
+    if batch_records or batch_malformed:
         batch_id += 1
-        yield (batch_id, good_records, malformed_count)
+        yield batch_id, batch_records, batch_malformed
+
+
+# ─── BACKWARD COMPATIBILITY (optional but safe) ───────────────────────────
+# If any file still calls old name
+parse_file_batched = parse_file_in_batches
