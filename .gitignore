@@ -1,9 +1,21 @@
 # Python
+venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Jupyter (if any)
+.ipynb_checkpoints/
+
+# Logs
+*.log
 
 # OS/editor
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Environment files
+.env
