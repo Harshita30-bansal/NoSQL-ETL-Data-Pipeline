@@ -67,8 +67,8 @@ class Orchestrator:
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(files):
-                self.current_data_file = files[idx][1]
-                print(f"✓ Selected: {files[idx][0]}")
+                self.current_data_file = list(DATA_FILES.values())
+                print("✓ Selected: ALL FILES (July + August)")
                 return True
         except ValueError:
             pass
@@ -148,9 +148,15 @@ class Orchestrator:
             print("✗ Batch size not selected. Going to settings...")
             self.select_batch_size()
 
-        if not os.path.exists(self.current_data_file):
-            print(f"✗ Data file not found: {self.current_data_file}")
-            return
+        if isinstance(self.current_data_file, list):
+            for f in self.current_data_file:
+                if not os.path.exists(f):
+                    print(f"✗ Data file not found: {f}")
+                    return
+        else:
+            if not os.path.exists(self.current_data_file):
+                print(f"✗ Data file not found: {self.current_data_file}")
+                return
 
         print("\n⏳ Starting pipeline execution...")
         print(f"   Pipeline: {pipeline_class.__name__}")
@@ -224,7 +230,7 @@ class Orchestrator:
     def run(self):
         """Main loop"""
         # Set defaults
-        self.current_data_file = DATA_FILES['july']
+        self.current_data_file = list(DATA_FILES.values())
         self.current_batch_size = BATCH_SIZES[1]  # Default to 5000
 
         while True:
