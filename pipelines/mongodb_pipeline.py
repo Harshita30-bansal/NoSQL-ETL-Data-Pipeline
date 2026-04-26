@@ -16,6 +16,13 @@ from config import MONGO_CONFIG, ERROR_STATUS_MIN, ERROR_STATUS_MAX
 class MongoDBPipeline(BasePipeline):
     def __init__(self, data_file, batch_size=5000, db_type='mysql'):
         super().__init__('MongoDB', data_file, batch_size, db_type)
+
+        #  SUPPORT MULTIPLE FILES
+        if isinstance(data_file, list):
+            self.data_files = data_file
+        else:
+            self.data_files = [data_file]
+
         self.mongo_config = MONGO_CONFIG
         self.mongo_client = None
         self.mongo_db = None
@@ -49,7 +56,7 @@ class MongoDBPipeline(BasePipeline):
 
             print("  Storing results in relational database...")
 
-            # ✅ FIX: Insert ONLY ONCE into query_results
+            # Insert ONE parent row
             self.db_manager.execute_update("""
                 INSERT INTO query_results (
                     run_id, pipeline_name, query_id, query_name,
@@ -73,7 +80,7 @@ class MongoDBPipeline(BasePipeline):
                 json.dumps({"summary": "all queries executed"})
             ))
 
-            # ✅ Insert actual query results
+            # Insert query outputs
             for batch_id, (query_id, query_results) in enumerate(results.items(), 1):
                 if query_id == 'query_1':
                     self.db_manager.insert_daily_traffic_results(
@@ -131,21 +138,26 @@ class MongoDBPipeline(BasePipeline):
         collection.create_index([('status_code', 1)])
         print("  ✓ MongoDB collection initialized")
 
+    # ✅ UPDATED: MULTI-FILE LOADING
     def _load_logs_to_mongodb(self):
         collection = self.mongo_db[self.mongo_config['collections']['logs']]
-        
-        for batch_id, records, malformed in parse_file_in_batches(self.data_file, self.batch_size):
-            self.batch_count = batch_id
-            self.total_records += len(records) + malformed
-            self.malformed_records += malformed
 
-            if records:
-                collection.insert_many(records)
-                print(f"  Batch {batch_id}: inserted {len(records)} records")
+        for file in self.data_files:
+            print(f"  Processing file: {file}")
+
+            for batch_id, records, malformed in parse_file_in_batches(file, self.batch_size):
+                self.batch_count += 1
+                self.total_records += len(records)
+                self.malformed_records += malformed
+
+                if records:
+                    collection.insert_many(records)
+                    print(f"  Batch {self.batch_count}: inserted {len(records)} records")
 
     def _execute_queries(self):
-        collection = self.mongo_db[self.mongo_config['collections']['logs']]
-        
+        collection = self.mongo_db[self.mongo_config['collections']['logs']
+        ]
+
         return {
             'query_1': self._query_1_aggregation(collection),
             'query_2': self._query_2_aggregation(collection),
@@ -189,37 +201,64 @@ class MongoDBPipeline(BasePipeline):
             {'$limit': 20}
         ]))
 
+    # ✅ FRIEND’S CORRECT LOGIC
     def _query_3_aggregation(self, collection):
         results = list(collection.aggregate([
-            {'$group': {
-                '_id': {'log_date': '$log_date', 'log_hour': '$log_hour'},
-                'error_request_count': {
-                    '$sum': {
-                        '$cond': [
-                            {'$and': [
-                                {'$gte': ['$status_code', ERROR_STATUS_MIN]},
-                                {'$lte': ['$status_code', ERROR_STATUS_MAX]}
-                            ]}, 1, 0
-                        ]
+            {
+                '$group': {
+                    '_id': {'log_date': '$log_date', 'log_hour': '$log_hour'},
+
+                    'total_request_count': {'$sum': 1},
+
+                    'error_request_count': {
+                        '$sum': {
+                            '$cond': [
+                                {'$and': [
+                                    {'$gte': ['$status_code', ERROR_STATUS_MIN]},
+                                    {'$lte': ['$status_code', ERROR_STATUS_MAX]}
+                                ]},
+                                1, 0
+                            ]
+                        }
+                    },
+
+                    'error_hosts': {
+                        '$addToSet': {
+                            '$cond': [
+                                {'$and': [
+                                    {'$gte': ['$status_code', ERROR_STATUS_MIN]},
+                                    {'$lte': ['$status_code', ERROR_STATUS_MAX]}
+                                ]},
+                                '$host',
+                                '$$REMOVE'
+                            ]
+                        }
                     }
-                },
-                'total_request_count': {'$sum': 1}
-            }},
-            {'$project': {
-                '_id': 0,
-                'log_date': '$_id.log_date',
-                'log_hour': '$_id.log_hour',
-                'error_request_count': 1,
-                'total_request_count': 1,
-                'error_rate': {
-                    '$divide': ['$error_request_count', '$total_request_count']
                 }
-            }},
+            },
+            {
+                '$project': {
+                    '_id': 0,
+                    'log_date': '$_id.log_date',
+                    'log_hour': '$_id.log_hour',
+                    'error_request_count': 1,
+                    'total_request_count': 1,
+                    'error_rate': {
+                        '$cond': [
+                            {'$gt': ['$total_request_count', 0]},
+                            {'$divide': ['$error_request_count', '$total_request_count']},
+                            0
+                        ]
+                    },
+                    'distinct_error_hosts': {
+                        '$size': '$error_hosts'
+                    }
+                }
+            },
             {'$sort': {'log_date': 1, 'log_hour': 1}}
         ]))
 
         for r in results:
             r['error_rate'] = round(r['error_rate'], 4)
-            r['distinct_error_hosts'] = 0
 
         return results
