@@ -30,9 +30,8 @@ class Reporter:
 
         exec_meta = results[0]
         
-        print(f"\n{'='*70}")
         print(f"EXECUTION SUMMARY REPORT - Run ID: {run_id}")
-        print(f"{'='*70}\n")
+        print("\n\n\n")
 
         summary_data = [
             ['Pipeline', exec_meta['pipeline_name']],
@@ -63,9 +62,8 @@ class Reporter:
             print("No results for Query 1")
             return
 
-        print(f"\n{'='*70}")
         print("QUERY 1: DAILY TRAFFIC SUMMARY")
-        print(f"{'='*70}\n")
+        print("\n\n\n")
 
         table_data = []
         for row in results:
@@ -94,9 +92,8 @@ class Reporter:
             print("No results for Query 2")
             return
 
-        print(f"\n{'='*70}")
         print("QUERY 2: TOP 20 REQUESTED RESOURCES")
-        print(f"{'='*70}\n")
+        print("\n\n\n")
 
         table_data = []
         for row in results:
@@ -128,9 +125,8 @@ class Reporter:
             print("No results for Query 3")
             return
 
-        print(f"\n{'='*70}")
         print("QUERY 3: HOURLY ERROR ANALYSIS (Status Codes 400-599)")
-        print(f"{'='*70}\n")
+        print("\n\n\n")
 
         table_data = []
         for row in results:
@@ -154,9 +150,7 @@ class Reporter:
         self.generate_query_2_report(run_id)
         self.generate_query_3_report(run_id, limit=10)
 
-        print(f"\n{'='*70}")
-        print("END OF REPORT")
-        print(f"{'='*70}\n")
+        print("\n\n\n")
 
     def list_all_executions(self):
         """List all pipeline executions"""
@@ -172,9 +166,8 @@ class Reporter:
             print("No executions found")
             return
 
-        print(f"\n{'='*90}")
-        print("ALL PIPELINE EXECUTIONS")
-        print(f"{'='*90}\n")
+        print("ALL PIPELINE EXECUTIONS : ")
+        print("\n\n\n")
 
         table_data = []
         for row in results:
