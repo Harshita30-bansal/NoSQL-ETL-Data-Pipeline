@@ -1,29 +1,181 @@
 """
-MapReduce Pipeline - ETL using Apache Hadoop MapReduce
-Generates MapReduce job code and executes them
+MapReduce Pipeline - ETL using Python-based MapReduce paradigm
+Implements the same three queries as the MongoDB pipeline using
+Map → Shuffle/Sort → Reduce phases executed in-process with batching.
 """
 
-import os
-import subprocess
 import time
-from datetime import datetime
 import json
+from collections import defaultdict
+from datetime import datetime
+from itertools import groupby
+
 from src.base_pipeline import BasePipeline
 from parser import parse_file_in_batches
+from config import ERROR_STATUS_MIN, ERROR_STATUS_MAX
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAPPER FUNCTIONS
+# Each mapper receives one parsed log record and emits (key, value) pairs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mapper_query1(record):
+    """
+    Query 1 – Daily Traffic Summary
+    Key  : (log_date, status_code)
+    Value: (bytes_transferred, 1)
+    """
+    key = (record["log_date"], record["status_code"])
+    value = (record["bytes_transferred"], 1)
+    return key, value
+
+
+def mapper_query2(record):
+    """
+    Query 2 – Top Requested Resources
+    Key  : resource_path
+    Value: (bytes_transferred, 1, host)
+    """
+    key = record["resource_path"]
+    value = (record["bytes_transferred"], 1, record["host"])
+    return key, value
+
+
+def mapper_query3(record):
+    """
+    Query 3 – Hourly Error Analysis
+    Key  : (log_date, log_hour)
+    Value: (is_error_int, host, 1)
+    """
+    is_error = 1 if ERROR_STATUS_MIN <= record["status_code"] <= ERROR_STATUS_MAX else 0
+    key = (record["log_date"], record["log_hour"])
+    value = (is_error, record["host"], 1)
+    return key, value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REDUCER FUNCTIONS
+# Each reducer receives a key and an iterable of values, and returns one
+# aggregated output dict for that key.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reducer_query1(key, values):
+    """
+    Reduce for Query 1.
+    Accumulate total_bytes and request_count for (log_date, status_code).
+    """
+    log_date, status_code = key
+    total_bytes = 0
+    request_count = 0
+    for bytes_transferred, count in values:
+        total_bytes += bytes_transferred
+        request_count += count
+    return {
+        "log_date": log_date,
+        "status_code": status_code,
+        "request_count": request_count,
+        "total_bytes": total_bytes,
+    }
+
+
+def reducer_query2(key, values):
+    """
+    Reduce for Query 2.
+    Accumulate request_count, total_bytes and distinct hosts per resource_path.
+    """
+    resource_path = key
+    total_bytes = 0
+    request_count = 0
+    hosts = set()
+    for bytes_transferred, count, host in values:
+        total_bytes += bytes_transferred
+        request_count += count
+        hosts.add(host)
+    return {
+        "resource_path": resource_path,
+        "request_count": request_count,
+        "total_bytes": total_bytes,
+        "distinct_host_count": len(hosts),
+    }
+
+
+def reducer_query3(key, values):
+    """
+    Reduce for Query 3.
+    Accumulate error counts, total counts and distinct error hosts per (date, hour).
+    """
+    log_date, log_hour = key
+    error_request_count = 0
+    total_request_count = 0
+    error_hosts = set()
+    for is_error, host, count in values:
+        total_request_count += count
+        if is_error:
+            error_request_count += count
+            error_hosts.add(host)
+    error_rate = round(error_request_count / total_request_count, 4) if total_request_count > 0 else 0.0
+    return {
+        "log_date": log_date,
+        "log_hour": log_hour,
+        "error_request_count": error_request_count,
+        "total_request_count": total_request_count,
+        "error_rate": error_rate,
+        "distinct_error_hosts": len(error_hosts),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHUFFLE / SORT (in-process)
+# Groups intermediate (key, value) pairs by key before passing to reducers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def shuffle_and_sort(pairs):
+    """
+    Collect all (key, value) pairs into a dict keyed by key.
+    Returns {key: [value, ...]} ready for the reduce phase.
+    """
+    grouped = defaultdict(list)
+    for key, value in pairs:
+        grouped[key].append(value)
+    return grouped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE CLASS
+# ─────────────────────────────────────────────────────────────────────────────
 
 class MapReducePipeline(BasePipeline):
-    """Apache Hadoop MapReduce-based pipeline"""
+    """
+    MapReduce-style ETL pipeline.
 
-    def __init__(self, data_file, batch_size=5000, db_type='mysql'):
-        super().__init__('MapReduce', data_file, batch_size, db_type)
-        self.mr_jobs_dir = 'mapreduce'
-        self.results_dir = 'results'
-        os.makedirs(self.mr_jobs_dir, exist_ok=True)
-        os.makedirs(self.results_dir, exist_ok=True)
+    Phases per batch:
+        MAP    – apply mapper to every parsed record → emit (key, value) pairs
+        SHUFFLE– group pairs by key (in-process)
+        REDUCE – apply reducer per key group → produce partial aggregates
+
+    After all batches are processed, a final merge reduce combines partial
+    aggregates from all batches into the final result sets.
+    """
+
+    def __init__(self, data_file, batch_size=5000, db_type="postgresql"):
+        super().__init__("MapReduce", data_file, batch_size, db_type)
+
+        # Support single file or list of files (same as MongoDB pipeline)
+        if isinstance(data_file, list):
+            self.data_files = data_file
+        else:
+            self.data_files = [data_file]
+
+        # Global intermediate stores – accumulated across all batches
+        # Structure: {key: [value, ...]}
+        self._intermediate_q1 = defaultdict(list)
+        self._intermediate_q2 = defaultdict(list)
+        self._intermediate_q3 = defaultdict(list)
+
+    # ── Public entry point ────────────────────────────────────────────────────
 
     def execute(self):
-        """Execute MapReduce pipeline"""
         print(f"\n{'='*60}")
         print(f"Executing {self.pipeline_name} Pipeline")
         print(f"{'='*60}\n")
@@ -31,34 +183,49 @@ class MapReducePipeline(BasePipeline):
         self.start_time = time.time()
 
         if not self.connect_db():
-            print("✗ Failed to connect to database")
+            print("✗ Failed to connect to relational database")
             return False
 
         try:
             execution_timestamp = datetime.now()
-            
-            print("  Preparing MapReduce jobs...")
-            self._generate_mapreduce_jobs()
-            
-            print("  Processing batches in Python (MapReduce simulation)...")
-            
-            for batch_id, records, malformed in parse_file_in_batches(self.data_file, self.batch_size):
-                self.batch_count = batch_id
-                self.total_records += len(records) + malformed
-                self.malformed_records += malformed
 
-                print(f"  Batch {batch_id}: {len(records)} records, {malformed} malformed")
+            # ── Phase 1: Map + Shuffle (per batch, per file) ─────────────────
+            print("  Phase 1: Map + Shuffle ...")
+            for file_path in self.data_files:
+                print(f"    Processing file: {file_path}")
+                self._map_and_shuffle_file(file_path)
 
-                if not records:
-                    continue
+            print(f"  ✓ Map+Shuffle complete | "
+                  f"batches={self.batch_count} | "
+                  f"records={self.total_records} | "
+                  f"malformed={self.malformed_records}")
 
-                # Simulate MapReduce query execution through Python aggregation
-                from src.query_processor import QueryProcessor
-                results = QueryProcessor.process_all_queries(records)
+            # ── Phase 2: Reduce ───────────────────────────────────────────────
+            print("  Phase 2: Reduce ...")
+            results_q1 = self._reduce_all(self._intermediate_q1, reducer_query1)
+            results_q2 = self._reduce_all(self._intermediate_q2, reducer_query2)
+            results_q3 = self._reduce_all(self._intermediate_q3, reducer_query3)
 
-                if not self._store_batch_results(results, batch_id, execution_timestamp):
-                    print("✗ Failed to store batch results")
-                    return False
+            # Query 2 post-processing: keep top 20 by request_count, add rank
+            results_q2.sort(key=lambda r: r["request_count"], reverse=True)
+            results_q2 = results_q2[:20]
+            for rank, row in enumerate(results_q2, 1):
+                row["rank"] = rank
+
+            # Query 3 post-processing: sort by date then hour
+            results_q3.sort(key=lambda r: (r["log_date"], r["log_hour"]))
+
+            # Query 1 post-processing: sort by date then status
+            results_q1.sort(key=lambda r: (r["log_date"], r["status_code"]))
+
+            print(f"  ✓ Reduce complete | "
+                  f"Q1 rows={len(results_q1)} | "
+                  f"Q2 rows={len(results_q2)} | "
+                  f"Q3 rows={len(results_q3)}")
+
+            # ── Phase 3: Load into relational DB ─────────────────────────────
+            print("  Phase 3: Loading results into relational database ...")
+            self._load_results(results_q1, results_q2, results_q3, execution_timestamp)
 
             self.end_time = time.time()
             self.save_metadata()
@@ -68,277 +235,108 @@ class MapReducePipeline(BasePipeline):
 
         except Exception as e:
             print(f"✗ Pipeline execution failed: {e}")
+            import traceback
+            traceback.print_exc()
             self.end_time = time.time()
             return False
+
         finally:
             self.disconnect_db()
 
-    def _generate_mapreduce_jobs(self):
-        """Generate MapReduce job source code"""
-        self._generate_query_1_mapper()
-        self._generate_query_1_reducer()
-        self._generate_query_2_mapper()
-        self._generate_query_2_reducer()
-        self._generate_query_3_mapper()
-        self._generate_query_3_reducer()
+    # ── Internal Map+Shuffle ──────────────────────────────────────────────────
 
-    def _generate_query_1_mapper(self):
-        """Generate Mapper for Query 1: Daily Traffic Summary"""
-        mapper = """
-import sys
-import re
-from datetime import datetime
+    def _map_and_shuffle_file(self, file_path):
+        """
+        Stream one file in batches, apply all three mappers per record,
+        and accumulate the intermediate (key→values) stores.
+        """
+        for batch_id, records, malformed in parse_file_in_batches(file_path, self.batch_size):
+            self.batch_count += 1
+            self.total_records += len(records)
+            self.malformed_records += malformed
 
-MONTH_MAP = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-             'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-             'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
+            # MAP phase for this batch
+            pairs_q1 = []
+            pairs_q2 = []
+            pairs_q3 = []
 
-LOG_PATTERN = re.compile(
-    r'(\\S+) \\S+ \\S+ '
-    r'\\[(\\d{2})/(\\w{3})/(\\d{4}):(\\d{2}):\\d{2}:\\d{2} [^\\]]+\\] '
-    r'"([A-Z]+)? ?([^\\s"]+)? ?(HTTP[^\\s"]*)?" '
-    r'(\\d{3}) (\\S+)'
-)
+            for record in records:
+                k1, v1 = mapper_query1(record)
+                pairs_q1.append((k1, v1))
 
-def parse_line(line):
-    match = LOG_PATTERN.match(line.strip())
-    if not match:
-        return None
-    groups = match.groups()
-    host, day, month_str, year, hour, method, resource, protocol, status_str, bytes_str = groups
-    month = MONTH_MAP.get(month_str)
-    if not month:
-        return None
-    log_date = f"{year}-{month}-{day.zfill(2)}"
-    status_code = int(status_str)
-    return {'log_date': log_date, 'status_code': status_code, 'bytes': 0 if bytes_str == '-' else int(bytes_str)}
+                k2, v2 = mapper_query2(record)
+                pairs_q2.append((k2, v2))
 
-for line in sys.stdin:
-    parsed = parse_line(line)
-    if parsed:
-        key = f"{parsed['log_date']}\\t{parsed['status_code']}"
-        value = f"1\\t{parsed['bytes']}"
-        print(f"{key}\\t{value}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_1_mapper.py')
-        with open(path, 'w') as f:
-            f.write(mapper)
-        print(f"  ✓ Generated {path}")
+                k3, v3 = mapper_query3(record)
+                pairs_q3.append((k3, v3))
 
-    def _generate_query_1_reducer(self):
-        """Generate Reducer for Query 1: Daily Traffic Summary"""
-        reducer = """
-import sys
+            # SHUFFLE phase – merge into global intermediate stores
+            for key, value in pairs_q1:
+                self._intermediate_q1[key].append(value)
+            for key, value in pairs_q2:
+                self._intermediate_q2[key].append(value)
+            for key, value in pairs_q3:
+                self._intermediate_q3[key].append(value)
 
-current_key = None
-current_count = 0
-current_bytes = 0
+            print(f"    Batch {self.batch_count}: mapped {len(records)} records "
+                  f"({malformed} malformed)")
 
-for line in sys.stdin:
-    line = line.strip()
-    parts = line.split('\\t')
-    if len(parts) >= 3:
-        key = f"{parts[0]}\\t{parts[1]}"
-        count = int(parts[2])
-        bytes_val = int(parts[3])
-        
-        if key != current_key:
-            if current_key:
-                print(f"{current_key}\\t{current_count}\\t{current_bytes}")
-            current_key = key
-            current_count = 0
-            current_bytes = 0
-        
-        current_count += count
-        current_bytes += bytes_val
+    # ── Internal Reduce ───────────────────────────────────────────────────────
 
-if current_key:
-    print(f"{current_key}\\t{current_count}\\t{current_bytes}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_1_reducer.py')
-        with open(path, 'w') as f:
-            f.write(reducer)
-        print(f"  ✓ Generated {path}")
+    @staticmethod
+    def _reduce_all(intermediate, reducer_fn):
+        """
+        Apply reducer_fn to each (key, values) group in intermediate dict.
+        Returns list of result dicts.
+        """
+        results = []
+        for key, values in intermediate.items():
+            result = reducer_fn(key, values)
+            results.append(result)
+        return results
 
-    def _generate_query_2_mapper(self):
-        """Generate Mapper for Query 2: Top Resources"""
-        mapper = """
-import sys
-import re
+    # ── Load results into relational DB ──────────────────────────────────────
 
-LOG_PATTERN = re.compile(
-    r'(\\S+) \\S+ \\S+ '
-    r'\\[(\\d{2})/(\\w{3})/(\\d{4}):(\\d{2}):\\d{2}:\\d{2} [^\\]]+\\] '
-    r'"([A-Z]+)? ?([^\\s"]+)? ?(HTTP[^\\s"]*)?" '
-    r'(\\d{3}) (\\S+)'
-)
+    def _load_results(self, results_q1, results_q2, results_q3, execution_timestamp):
+        """
+        Insert a parent row into query_results, then insert per-query result rows.
+        Mirrors the load pattern used by the MongoDB pipeline.
+        """
+        elapsed_ms = int((time.time() - self.start_time) * 1000)
 
-def parse_line(line):
-    match = LOG_PATTERN.match(line.strip())
-    if not match:
-        return None
-    groups = match.groups()
-    host, day, month_str, year, hour, method, resource, protocol, status_str, bytes_str = groups
-    if not resource:
-        return None
-    bytes_val = 0 if bytes_str == '-' else int(bytes_str)
-    return {'host': host, 'resource': resource, 'bytes': bytes_val}
+        # Parent row in query_results
+        self.db_manager.execute_update("""
+            INSERT INTO query_results (
+                run_id, pipeline_name, query_id, query_name,
+                batch_id, batch_size, avg_batch_size,
+                execution_time_ms, execution_timestamp,
+                malformed_records, total_records_processed, result_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            self.run_id,
+            self.pipeline_name,
+            1,
+            "all_queries",
+            self.batch_count,
+            self.batch_size,
+            self.total_records / self.batch_count if self.batch_count else 0,
+            elapsed_ms,
+            execution_timestamp,
+            self.malformed_records,
+            self.total_records,
+            json.dumps({"summary": "all queries executed via MapReduce"})
+        ))
 
-for line in sys.stdin:
-    parsed = parse_line(line)
-    if parsed:
-        print(f"{parsed['resource']}\\t1\\t{parsed['bytes']}\\t{parsed['host']}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_2_mapper.py')
-        with open(path, 'w') as f:
-            f.write(mapper)
-        print(f"  ✓ Generated {path}")
+        # Query-specific result rows
+        self.db_manager.insert_daily_traffic_results(
+            results_q1, self.run_id, self.pipeline_name, 1, execution_timestamp
+        )
+        self.db_manager.insert_top_resources_results(
+            results_q2, self.run_id, self.pipeline_name, 1, execution_timestamp
+        )
+        self.db_manager.insert_error_analysis_results(
+            results_q3, self.run_id, self.pipeline_name, 1, execution_timestamp
+        )
 
-    def _generate_query_2_reducer(self):
-        """Generate Reducer for Query 2: Top Resources"""
-        reducer = """
-import sys
-
-current_resource = None
-current_count = 0
-current_bytes = 0
-current_hosts = set()
-
-for line in sys.stdin:
-    line = line.strip()
-    parts = line.split('\\t')
-    if len(parts) >= 4:
-        resource = parts[0]
-        count = int(parts[1])
-        bytes_val = int(parts[2])
-        host = parts[3]
-        
-        if resource != current_resource:
-            if current_resource:
-                print(f"{current_resource}\\t{current_count}\\t{current_bytes}\\t{len(current_hosts)}")
-            current_resource = resource
-            current_count = 0
-            current_bytes = 0
-            current_hosts = set()
-        
-        current_count += count
-        current_bytes += bytes_val
-        current_hosts.add(host)
-
-if current_resource:
-    print(f"{current_resource}\\t{current_count}\\t{current_bytes}\\t{len(current_hosts)}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_2_reducer.py')
-        with open(path, 'w') as f:
-            f.write(reducer)
-        print(f"  ✓ Generated {path}")
-
-    def _generate_query_3_mapper(self):
-        """Generate Mapper for Query 3: Error Analysis"""
-        mapper = """
-import sys
-import re
-
-MONTH_MAP = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-             'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-             'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
-
-LOG_PATTERN = re.compile(
-    r'(\\S+) \\S+ \\S+ '
-    r'\\[(\\d{2})/(\\w{3})/(\\d{4}):(\\d{2}):\\d{2}:\\d{2} [^\\]]+\\] '
-    r'"([A-Z]+)? ?([^\\s"]+)? ?(HTTP[^\\s"]*)?" '
-    r'(\\d{3}) (\\S+)'
-)
-
-def parse_line(line):
-    match = LOG_PATTERN.match(line.strip())
-    if not match:
-        return None
-    groups = match.groups()
-    host, day, month_str, year, hour, method, resource, protocol, status_str, bytes_str = groups
-    month = MONTH_MAP.get(month_str)
-    if not month:
-        return None
-    log_date = f"{year}-{month}-{day.zfill(2)}"
-    status_code = int(status_str)
-    is_error = 1 if 400 <= status_code < 600 else 0
-    return {'log_date': log_date, 'log_hour': int(hour), 'is_error': is_error, 'host': host, 'status_code': status_code}
-
-for line in sys.stdin:
-    parsed = parse_line(line)
-    if parsed:
-        key = f"{parsed['log_date']}\\t{parsed['log_hour']}"
-        error_flag = parsed['is_error']
-        host_info = f"{parsed['host']}:{error_flag}"
-        print(f"{key}\\t1\\t{error_flag}\\t{host_info}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_3_mapper.py')
-        with open(path, 'w') as f:
-            f.write(mapper)
-        print(f"  ✓ Generated {path}")
-
-    def _generate_query_3_reducer(self):
-        """Generate Reducer for Query 3: Error Analysis"""
-        reducer = """
-import sys
-
-current_key = None
-total_count = 0
-error_count = 0
-error_hosts = set()
-
-for line in sys.stdin:
-    line = line.strip()
-    parts = line.split('\\t')
-    if len(parts) >= 4:
-        key = f"{parts[0]}\\t{parts[1]}"
-        count = int(parts[2])
-        error_flag = int(parts[3])
-        host_info = parts[4]
-        
-        if key != current_key:
-            if current_key:
-                error_rate = (error_count / total_count) if total_count > 0 else 0
-                print(f"{current_key}\\t{error_count}\\t{total_count}\\t{error_rate:.4f}\\t{len(error_hosts)}")
-            current_key = key
-            total_count = 0
-            error_count = 0
-            error_hosts = set()
-        
-        total_count += count
-        error_count += error_flag
-        if error_flag == 1:
-            host = host_info.split(':')[0]
-            error_hosts.add(host)
-
-if current_key:
-    error_rate = (error_count / total_count) if total_count > 0 else 0
-    print(f"{current_key}\\t{error_count}\\t{total_count}\\t{error_rate:.4f}\\t{len(error_hosts)}")
-"""
-        path = os.path.join(self.mr_jobs_dir, 'query_3_reducer.py')
-        with open(path, 'w') as f:
-            f.write(reducer)
-        print(f"  ✓ Generated {path}")
-
-    def _store_batch_results(self, results, batch_id, execution_timestamp):
-        """Store query results in database"""
-        try:
-            if results['query_1']:
-                self.db_manager.insert_daily_traffic_results(
-                    results['query_1'], self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                )
-
-            if results['query_2']:
-                self.db_manager.insert_top_resources_results(
-                    results['query_2'], self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                )
-
-            if results['query_3']:
-                self.db_manager.insert_error_analysis_results(
-                    results['query_3'], self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                )
-
-            return True
-        except Exception as e:
-            print(f"✗ Failed to store results: {e}")
-            return False
+        print("  ✓ Results stored in relational database")
