@@ -77,7 +77,7 @@ def create_postgresql_database():
         
         config = DB_CONFIG['postgresql']
         
-        # First connect to default postgres database
+        # 1. Connect to default postgres database to create the new DB
         connection = psycopg2.connect(
             host=config['host'],
             port=config['port'],
@@ -89,7 +89,6 @@ def create_postgresql_database():
         connection.autocommit = True
         cursor = connection.cursor()
         
-        # Create database
         db_name = config['database']
         print(f"Creating database: {db_name}...")
         cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")
@@ -99,7 +98,7 @@ def create_postgresql_database():
         cursor.close()
         connection.close()
         
-        # Connect to the new database
+        # 2. Connect to the newly created database to initialize schema
         connection = psycopg2.connect(
             host=config['host'],
             port=config['port'],
@@ -110,23 +109,23 @@ def create_postgresql_database():
         
         cursor = connection.cursor()
         
-        # Read schema (adapt SQL for PostgreSQL)
+        # Read the schema file
         with open('db/schema.sql', 'r') as f:
             schema = f.read()
         
-        # PostgreSQL uses different AUTO_INCREMENT syntax
+        # Clean and adapt SQL for PostgreSQL 
+        # (These ensures compatibility if your schema has MySQL-style syntax)
         schema = schema.replace('AUTO_INCREMENT', 'SERIAL')
         schema = schema.replace('INT PRIMARY KEY AUTO_INCREMENT', 'SERIAL PRIMARY KEY')
-        schema = schema.replace('JSON', 'jsonb')
+        schema = schema.replace('JSON ', 'jsonb ') # Project uses JSONB for results
         
-        print("Creating tables...")
-        statements = schema.split(';')
-        for statement in statements:
-            statement = statement.strip()
-            if statement and not statement.startswith('--'):
-                cursor.execute(statement)
+        print("Creating tables and indexes...")
         
-        print("✓ Tables created successfully")
+        # CHANGE: Execute the entire schema as one block.
+        # This preserves Foreign Key relationships and table dependencies.
+        cursor.execute(schema)
+        
+        print("✓ Tables and indexes created successfully")
         
         connection.commit()
         cursor.close()
