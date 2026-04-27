@@ -9,68 +9,10 @@ from config import DB_CONFIG, DEFAULT_DB
 import pymysql
 
 
-def create_mysql_database():
-    """Create MySQL database and tables"""
-    print("\n" + "="*70)
-    print("INITIALIZING MYSQL DATABASE")
-    print("="*70 + "\n")
-
-    config = DB_CONFIG['mysql']
-    
-    try:
-        # Connect to MySQL server
-        connection = pymysql.connect(
-            host=config['host'],
-            port=config['port'],
-            user=config['user'],
-            password=config['password'],
-            charset='utf8mb4'
-        )
-        
-        cursor = connection.cursor()
-        
-        # Create database
-        db_name = config['database']
-        print(f"Creating database: {db_name}...")
-        cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")
-        cursor.execute(f"CREATE DATABASE {db_name}")
-        cursor.execute(f"USE {db_name}")
-        print(f"✓ Database created: {db_name}")
-        
-        # Read schema
-        with open('db/schema.sql', 'r') as f:
-            schema = f.read()
-        
-        # Execute schema
-        print("Creating tables...")
-        statements = schema.split(';')
-        for statement in statements:
-            statement = statement.strip()
-            if statement and not statement.startswith('--'):
-                cursor.execute(statement)
-        
-        print("✓ Tables created successfully")
-        
-        connection.commit()
-        cursor.close()
-        connection.close()
-        
-        print("\n✓ MySQL initialization completed!\n")
-        return True
-        
-    except pymysql.Error as e:
-        print(f"\n✗ MySQL Error: {e}\n")
-        return False
-    except Exception as e:
-        print(f"\n✗ Error: {e}\n")
-        return False
-
-
 def create_postgresql_database():
     """Create PostgreSQL database and tables"""
-    print("\n" + "="*70)
     print("INITIALIZING POSTGRESQL DATABASE")
-    print("="*70 + "\n")
+    print("\n\n\n")
 
     try:
         import psycopg2
@@ -125,25 +67,25 @@ def create_postgresql_database():
         # This preserves Foreign Key relationships and table dependencies.
         cursor.execute(schema)
         
-        print("✓ Tables and indexes created successfully")
+        print("Tables and indexes created successfully")
         
         connection.commit()
         cursor.close()
         connection.close()
         
-        print("\n✓ PostgreSQL initialization completed!\n")
+        print("\nPostgreSQL initialization completed!\n")
         return True
         
     except Exception as e:
-        print(f"\n✗ PostgreSQL Error: {e}\n")
+        print(f"\nPostgreSQL Error: {e}\n")
         return False
 
 
 def create_project_directories():
     """Create necessary project directories"""
-    print("\n" + "="*70)
+    
     print("CREATING PROJECT DIRECTORIES")
-    print("="*70 + "\n")
+    print("\n\n\n")
 
     directories = [
         'data',
@@ -167,14 +109,13 @@ def create_project_directories():
         else:
             print(f"  Exists: {dir_name}/")
 
-    print("\n✓ All directories are ready!\n")
+    print("\n All directories are ready!\n")
 
 
 def verify_data_files():
     """Verify that data files exist"""
-    print("\n" + "="*70)
     print("VERIFYING DATA FILES")
-    print("="*70 + "\n")
+    print("\n\n\n")
 
     files_required = [
         'data/NASA_access_log_Jul95',
@@ -185,28 +126,27 @@ def verify_data_files():
     for file_path in files_required:
         if os.path.exists(file_path):
             size = os.path.getsize(file_path)
-            print(f"✓ Found: {file_path} ({size:,} bytes)")
+            print(f" Found: {file_path} ({size:,} bytes)")
         else:
-            print(f"✗ Missing: {file_path}")
+            print(f" Missing: {file_path}")
             all_exist = False
     
     if not all_exist:
-        print("\n⚠ Some data files are missing.")
+        print("\n Some data files are missing.")
         print("Please download NASA logs from:")
         print("  https://ita.ee.lbl.gov/traces/NASA_access_log_Jul95.gz")
         print("  https://ita.ee.lbl.gov/traces/NASA_access_log_Aug95.gz")
         print("  Then decompress and place in data/ directory\n")
     else:
-        print("\n✓ All data files are present!\n")
+        print("\n All data files are present!\n")
 
     return all_exist
 
 
 def main():
     """Main setup routine"""
-    print("\n" + "="*70)
     print("ETL FRAMEWORK - SETUP & INITIALIZATION")
-    print("="*70)
+    print("\n\n\n")
 
     # Create directories
     create_project_directories()
@@ -214,29 +154,11 @@ def main():
     # Verify data files
     verify_data_files()
 
-    # Initialize database
-    print("Select database to initialize:")
-    print("  1. MySQL")
-    print("  2. PostgreSQL")
-    print("  0. Skip database initialization")
     
-    choice = input("\nEnter choice (0-2): ").strip()
+    create_postgresql_database()
     
-    if choice == '1':
-        if not create_mysql_database():
-            print("✗ MySQL initialization failed")
-            sys.exit(1)
-    elif choice == '2':
-        if not create_postgresql_database():
-            print("✗ PostgreSQL initialization failed")
-            sys.exit(1)
-    elif choice != '0':
-        print("✗ Invalid choice")
-        sys.exit(1)
+    print("SETUP COMPLETED!")
 
-    print("="*70)
-    print("✓ SETUP COMPLETED!")
-    print("="*70)
     print("\nYou can now run the ETL framework with:")
     print("  python orchestrator.py\n")
 
