@@ -23,17 +23,14 @@ class Orchestrator:
         self.current_pipeline = None
         self.current_data_file = None
         self.current_batch_size = None
-        self.current_db = 'mysql'
+        self.current_db = 'postgresql'
         self.run_id = None
 
     def display_menu(self):
-        """Display main menu"""
-        print("\n" + "="*70)
-        print("MULTI-PIPELINE ETL AND REPORTING FRAMEWORK")
-        print("NASA HTTP Web Server Log Analytics")
-        print("="*70 + "\n")
+        
+        print("Choose Action to perform : ")
 
-        print("1. Execute Python Native Pipeline (Baseline)")
+        print("1. Exit")
         print("2. Execute Apache Pig Pipeline")
         print("3. Execute MapReduce Pipeline")
         print("4. Execute MongoDB Pipeline")
@@ -41,15 +38,12 @@ class Orchestrator:
         print("6. View Execution History")
         print("7. Generate Report")
         print("8. Compare Pipelines")
-        print("9. Settings")
-        print("0. Exit")
+        # print("9. Settings")
         print()
 
     def display_settings(self):
         """Display current settings"""
-        print("\n" + "-"*70)
         print("CURRENT SETTINGS:")
-        print("-"*70)
         print(f"Database Type: {self.current_db}")
         print(f"Default Data File: {self.current_data_file or 'Not selected'}")
         print(f"Default Batch Size: {self.current_batch_size or 'Not selected'}")
@@ -68,12 +62,12 @@ class Orchestrator:
             idx = int(choice) - 1
             if 0 <= idx < len(files):
                 self.current_data_file = list(DATA_FILES.values())
-                print("✓ Selected: ALL FILES (July + August)")
+                print("Selected: ALL FILES (July + August)")
                 return True
         except ValueError:
             pass
         
-        print("✗ Invalid choice")
+        print("Invalid choice")
         return False
 
     def select_batch_size(self):
@@ -88,77 +82,55 @@ class Orchestrator:
             idx = int(choice) - 1
             if 0 <= idx < len(BATCH_SIZES):
                 self.current_batch_size = BATCH_SIZES[idx]
-                print(f"✓ Selected: {self.current_batch_size:,} records per batch")
+                print(f"Selected: {self.current_batch_size:,} records per batch")
                 return True
         except ValueError:
             pass
         
-        print("✗ Invalid choice")
+        print("Invalid choice")
         return False
 
-    def select_database(self):
-        """Select database type"""
-        print("\nSelect database:")
-        print("  1. MySQL")
-        print("  2. PostgreSQL")
-        
-        choice = input("Enter choice (1-2): ")
-        
-        if choice == '1':
-            self.current_db = 'mysql'
-            print("✓ Selected: MySQL")
-            return True
-        elif choice == '2':
-            self.current_db = 'postgresql'
-            print("✓ Selected: PostgreSQL")
-            return True
-        
-        print("✗ Invalid choice")
-        return False
 
     def settings_menu(self):
         """Settings menu"""
         while True:
             self.display_settings()
-            print("1. Change Database Type")
-            print("2. Change Data File")
-            print("3. Change Batch Size")
-            print("4. Back to Main Menu")
+            print("1. Change Data File")
+            print("2. Change Batch Size")
+            print("3. Back to Main Menu")
             
-            choice = input("Enter choice (1-4): ")
+            choice = input("Enter choice (1-3): ")
             
             if choice == '1':
-                self.select_database()
-            elif choice == '2':
                 self.select_data_file()
-            elif choice == '3':
+            elif choice == '2':
                 self.select_batch_size()
-            elif choice == '4':
+            elif choice == '3':
                 break
             else:
-                print("✗ Invalid choice")
+                print("Invalid choice")
 
     def execute_pipeline(self, pipeline_class):
         """Execute a pipeline"""
         if not self.current_data_file:
-            print("✗ Data file not selected. Going to settings...")
+            print("Data file not selected. Going to settings...")
             self.select_data_file()
         
         if not self.current_batch_size:
-            print("✗ Batch size not selected. Going to settings...")
+            print("Batch size not selected. Going to settings...")
             self.select_batch_size()
 
         if isinstance(self.current_data_file, list):
             for f in self.current_data_file:
                 if not os.path.exists(f):
-                    print(f"✗ Data file not found: {f}")
+                    print(f"Data file not found: {f}")
                     return
         else:
             if not os.path.exists(self.current_data_file):
-                print(f"✗ Data file not found: {self.current_data_file}")
+                print(f"Data file not found: {self.current_data_file}")
                 return
 
-        print("\n⏳ Starting pipeline execution...")
+        print("\n Starting pipeline execution...")
         print(f"   Pipeline: {pipeline_class.__name__}")
         print(f"   Data File: {self.current_data_file}")
         print(f"   Batch Size: {self.current_batch_size:,}")
@@ -176,7 +148,7 @@ class Orchestrator:
             success = pipeline.execute()
             
             if success:
-                print(f"\n✓ Pipeline execution completed successfully!")
+                print(f"\nPipeline execution completed successfully!")
                 print(f"  Run ID: {self.run_id}")
                 
                 # Offer to generate report
@@ -184,10 +156,10 @@ class Orchestrator:
                 if choice.lower() == 'y':
                     self.generate_report(self.run_id)
             else:
-                print(f"\n✗ Pipeline execution failed!")
+                print(f"\nPipeline execution failed!")
         
         except Exception as e:
-            print(f"✗ Error during pipeline execution: {e}")
+            print(f"Error during pipeline execution: {e}")
 
     def generate_report(self, run_id=None):
         """Generate execution report"""
@@ -209,7 +181,7 @@ class Orchestrator:
                     print("No executions found")
         
         except Exception as e:
-            print(f"✗ Error generating report: {e}")
+            print(f"Error generating report: {e}")
 
     def view_execution_history(self):
         """View execution history"""
@@ -217,7 +189,7 @@ class Orchestrator:
             reporter = Reporter(self.current_db)
             reporter.list_all_executions()
         except Exception as e:
-            print(f"✗ Error retrieving history: {e}")
+            print(f"Error retrieving history: {e}")
 
     def compare_pipelines(self):
         """Compare pipeline performance"""
@@ -225,7 +197,7 @@ class Orchestrator:
             reporter = Reporter(self.current_db)
             reporter.compare_pipelines()
         except Exception as e:
-            print(f"✗ Error comparing pipelines: {e}")
+            print(f"Error comparing pipelines: {e}")
 
     def run(self):
         """Main loop"""
@@ -235,10 +207,11 @@ class Orchestrator:
 
         while True:
             self.display_menu()
-            choice = input("Enter choice (0-9): ").strip()
+            choice = input("Enter choice (1-8): ").strip()
 
             if choice == '1':
-                self.execute_pipeline(PythonNativePipeline)
+                print("\nGoodbye!")
+                break
             elif choice == '2':
                 self.execute_pipeline(PigPipeline)
             elif choice == '3':
@@ -253,13 +226,10 @@ class Orchestrator:
                 self.generate_report()
             elif choice == '8':
                 self.compare_pipelines()
-            elif choice == '9':
-                self.settings_menu()
-            elif choice == '0':
-                print("\n✓ Thank you for using the ETL Framework. Goodbye!")
-                break
+            # elif choice == '9':
+            #     self.settings_menu()
             else:
-                print("✗ Invalid choice. Please try again.")
+                print("Invalid choice. Please try again.")
 
             input("\nPress Enter to continue...")
 
