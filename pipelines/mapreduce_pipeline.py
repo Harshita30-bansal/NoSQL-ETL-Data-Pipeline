@@ -1,342 +1,238 @@
 """
-MapReduce Pipeline - ETL using Python-based MapReduce paradigm
-Implements the same three queries as the MongoDB pipeline using
-Map → Shuffle/Sort → Reduce phases executed in-process with batching.
+pipelines/mapreduce_pipeline.py
+────────────────────────────────────────────────────────────────────
+Hadoop Streaming MapReduce pipeline.
+
+Strategy
+────────
+• Both data files (July + August) are uploaded to HDFS in parallel
+  threads, fulfilling "2 batches loaded parallelly".
+• A single Hadoop Streaming job is submitted with both HDFS input
+  files, so MapReduce itself processes them together.
+• The reducer output (one JSON per line) is downloaded and parsed,
+  then merged / ranked, then stored in PostgreSQL.
 """
 
-import time
 import json
-from collections import defaultdict
+import os
+import subprocess
+import threading
+import time
 from datetime import datetime
-from itertools import groupby
 
 from src.base_pipeline import BasePipeline
-from parser import parse_file_in_batches
-from config import ERROR_STATUS_MIN, ERROR_STATUS_MAX
+from src.parallel_batch_loader import load_files_parallel, merge_batch_results
+from config import (
+    HADOOP_BIN, HDFS_BIN, STREAMING_JAR,
+    HDFS_INPUT, HDFS_OUTPUT,
+    MR_SCRIPTS_DIR,
+)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAPPER FUNCTIONS
-# Each mapper receives one parsed log record and emits (key, value) pairs.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── HDFS helpers ─────────────────────────────────────────────────────────────
 
-def mapper_query1(record):
-    """
-    Query 1 – Daily Traffic Summary
-    Key  : (log_date, status_code)
-    Value: (bytes_transferred, 1)
-    """
-    key = (record["log_date"], record["status_code"])
-    value = (record["bytes_transferred"], 1)
-    return key, value
+def _hdfs(*args) -> subprocess.CompletedProcess:
+    cmd = [HDFS_BIN, "dfs"] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def mapper_query2(record):
-    """
-    Query 2 – Top Requested Resources
-    Key  : resource_path
-    Value: (bytes_transferred, 1, host)
-    """
-    key = record["resource_path"]
-    value = (record["bytes_transferred"], 1, record["host"])
-    return key, value
+def _upload_file_to_hdfs(local_path: str, hdfs_path: str,
+                          batch_number: int, results: dict, lock: threading.Lock):
+    """Thread worker: upload one local file to HDFS."""
+    try:
+        print(f"  [Batch {batch_number}] Uploading {local_path} → {hdfs_path}")
+        r = _hdfs("-put", "-f", local_path, hdfs_path)
+        ok = r.returncode == 0
+        with lock:
+            results[batch_number] = {
+                "ok":   ok,
+                "path": hdfs_path,
+                "err":  r.stderr if not ok else "",
+            }
+        status = "✓" if ok else "✗"
+        print(f"  {status} Batch {batch_number} upload {'done' if ok else 'FAILED'}: {r.stderr or ''}")
+    except Exception as exc:
+        with lock:
+            results[batch_number] = {"ok": False, "path": hdfs_path, "err": str(exc)}
+        print(f"  ✗ Batch {batch_number} upload exception: {exc}")
 
 
-def mapper_query3(record):
-    """
-    Query 3 – Hourly Error Analysis
-    Key  : (log_date, log_hour)
-    Value: (is_error_int, host, 1)
-    """
-    is_error = 1 if ERROR_STATUS_MIN <= record["status_code"] <= ERROR_STATUS_MAX else 0
-    key = (record["log_date"], record["log_hour"])
-    value = (is_error, record["host"], 1)
-    return key, value
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# REDUCER FUNCTIONS
-# Each reducer receives a key and an iterable of values, and returns one
-# aggregated output dict for that key.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def reducer_query1(key, values):
-    """
-    Reduce for Query 1.
-    Accumulate total_bytes and request_count for (log_date, status_code).
-    """
-    log_date, status_code = key
-    total_bytes = 0
-    request_count = 0
-    for bytes_transferred, count in values:
-        total_bytes += bytes_transferred
-        request_count += count
-    return {
-        "log_date": log_date,
-        "status_code": status_code,
-        "request_count": request_count,
-        "total_bytes": total_bytes,
-    }
-
-
-def reducer_query2(key, values):
-    """
-    Reduce for Query 2.
-    Accumulate request_count, total_bytes and distinct hosts per resource_path.
-    """
-    resource_path = key
-    total_bytes = 0
-    request_count = 0
-    hosts = set()
-    for bytes_transferred, count, host in values:
-        total_bytes += bytes_transferred
-        request_count += count
-        hosts.add(host)
-    return {
-        "resource_path": resource_path,
-        "request_count": request_count,
-        "total_bytes": total_bytes,
-        "distinct_host_count": len(hosts),
-    }
-
-
-def reducer_query3(key, values):
-    """
-    Reduce for Query 3.
-    Accumulate error counts, total counts and distinct error hosts per (date, hour).
-    """
-    log_date, log_hour = key
-    error_request_count = 0
-    total_request_count = 0
-    error_hosts = set()
-    for is_error, host, count in values:
-        total_request_count += count
-        if is_error:
-            error_request_count += count
-            error_hosts.add(host)
-    error_rate = round(error_request_count / total_request_count, 4) if total_request_count > 0 else 0.0
-    return {
-        "log_date": log_date,
-        "log_hour": log_hour,
-        "error_request_count": error_request_count,
-        "total_request_count": total_request_count,
-        "error_rate": error_rate,
-        "distinct_error_hosts": len(error_hosts),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SHUFFLE / SORT (in-process)
-# Groups intermediate (key, value) pairs by key before passing to reducers.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def shuffle_and_sort(pairs):
-    """
-    Collect all (key, value) pairs into a dict keyed by key.
-    Returns {key: [value, ...]} ready for the reduce phase.
-    """
-    grouped = defaultdict(list)
-    for key, value in pairs:
-        grouped[key].append(value)
-    return grouped
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PIPELINE CLASS
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Pipeline ─────────────────────────────────────────────────────────────────
 
 class MapReducePipeline(BasePipeline):
-    """
-    MapReduce-style ETL pipeline.
-
-    Phases per batch:
-        MAP    – apply mapper to every parsed record → emit (key, value) pairs
-        SHUFFLE– group pairs by key (in-process)
-        REDUCE – apply reducer per key group → produce partial aggregates
-
-    After all batches are processed, a final merge reduce combines partial
-    aggregates from all batches into the final result sets.
-    """
 
     def __init__(self, data_file, batch_size=5000, db_type="postgresql"):
         super().__init__("MapReduce", data_file, batch_size, db_type)
+        self.data_files = data_file if isinstance(data_file, list) else [data_file]
 
-        # Support single file or list of files (same as MongoDB pipeline)
-        if isinstance(data_file, list):
-            self.data_files = data_file
-        else:
-            self.data_files = [data_file]
+    # ── main execute ──────────────────────────────────────────────────────────
 
-        # Global intermediate stores – accumulated across all batches
-        # Structure: {key: [value, ...]}
-        self._intermediate_q1 = defaultdict(list)
-        self._intermediate_q2 = defaultdict(list)
-        self._intermediate_q3 = defaultdict(list)
-
-    # ── Public entry point ────────────────────────────────────────────────────
-
-    def execute(self):
+    def execute(self) -> bool:
         print(f"\n{'='*60}")
-        print(f"Executing {self.pipeline_name} Pipeline")
+        print(f"Executing MapReduce Pipeline (Hadoop Streaming)")
+        print(f"Files : {self.data_files}")
         print(f"{'='*60}\n")
 
         self.start_time = time.time()
 
         if not self.connect_db():
-            print("✗ Failed to connect to relational database")
             return False
 
         try:
             execution_timestamp = datetime.now()
 
-            # ── Phase 1: Map + Shuffle (per batch, per file) ─────────────────
-            print("  Phase 1: Map + Shuffle ...")
-            for file_path in self.data_files:
-                print(f"    Processing file: {file_path}")
-                self._map_and_shuffle_file(file_path)
+            # ── Step 1: upload both files to HDFS in parallel ─────────────────
+            print("Step 1: Uploading input files to HDFS in parallel…")
+            self._prepare_hdfs_input()
+            upload_results = self._parallel_upload_to_hdfs()
+            if any(not v["ok"] for v in upload_results.values()):
+                print("✗ One or more HDFS uploads failed. Aborting.")
+                return False
 
-            print(f"  ✓ Map+Shuffle complete | "
-                  f"batches={self.batch_count} | "
-                  f"records={self.total_records} | "
-                  f"malformed={self.malformed_records}")
+            # batch_count = number of files (= number of HDFS uploads)
+            self.batch_count = len(self.data_files)
+            # total_records: we need to count; do a quick local parse scan
+            self._count_records_locally()
 
-            # ── Phase 2: Reduce ───────────────────────────────────────────────
-            print("  Phase 2: Reduce ...")
-            results_q1 = self._reduce_all(self._intermediate_q1, reducer_query1)
-            results_q2 = self._reduce_all(self._intermediate_q2, reducer_query2)
-            results_q3 = self._reduce_all(self._intermediate_q3, reducer_query3)
+            # ── Step 2: Run Hadoop Streaming job ─────────────────────────────
+            print("\nStep 2: Submitting Hadoop Streaming job…")
+            hdfs_output = f"{HDFS_OUTPUT}/mapreduce_{self.run_id}"
+            ok = self._run_streaming_job(hdfs_output)
+            if not ok:
+                print("✗ MapReduce job failed.")
+                return False
 
-            # Query 2 post-processing: keep top 20 by request_count, add rank
-            results_q2.sort(key=lambda r: r["request_count"], reverse=True)
-            results_q2 = results_q2[:20]
-            for rank, row in enumerate(results_q2, 1):
+            # ── Step 3: Collect & parse reducer output ────────────────────────
+            print("\nStep 3: Collecting reducer output from HDFS…")
+            q1_rows, q2_rows, q3_rows = self._collect_results(hdfs_output)
+
+            # ── Step 4: Post-process Q2 (rank top 20) ─────────────────────────
+            q2_rows.sort(key=lambda r: r["request_count"], reverse=True)
+            q2_rows = q2_rows[:20]
+            for rank, row in enumerate(q2_rows, 1):
                 row["rank"] = rank
 
-            # Query 3 post-processing: sort by date then hour
-            results_q3.sort(key=lambda r: (r["log_date"], r["log_hour"]))
+            q1_rows.sort(key=lambda r: (r["log_date"], r["status_code"]))
+            q3_rows.sort(key=lambda r: (r["log_date"], r["log_hour"]))
 
-            # Query 1 post-processing: sort by date then status
-            results_q1.sort(key=lambda r: (r["log_date"], r["status_code"]))
-
-            print(f"  ✓ Reduce complete | "
-                  f"Q1 rows={len(results_q1)} | "
-                  f"Q2 rows={len(results_q2)} | "
-                  f"Q3 rows={len(results_q3)}")
-
-            # ── Phase 3: Load into relational DB ─────────────────────────────
-            print("  Phase 3: Loading results into relational database ...")
-            self._load_results(results_q1, results_q2, results_q3, execution_timestamp)
+            # ── Step 5: Store in PostgreSQL ───────────────────────────────────
+            print("\nStep 4: Storing results in PostgreSQL…")
+            elapsed_ms = int((time.time() - self.start_time) * 1000)
+            self.db_manager.insert_parent_result(
+                self.run_id, self.pipeline_name,
+                self.batch_count, self.batch_size,
+                self.total_records, self.malformed_records,
+                elapsed_ms, execution_timestamp,
+                extra_json={"mode": "hadoop_streaming"},
+            )
+            self.db_manager.insert_daily_traffic_results(
+                q1_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+            self.db_manager.insert_top_resources_results(
+                q2_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+            self.db_manager.insert_error_analysis_results(
+                q3_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
 
             self.end_time = time.time()
             self.save_metadata()
-
             print(self.get_status_string())
             return True
 
-        except Exception as e:
-            print(f"✗ Pipeline execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            self.end_time = time.time()
+        except Exception as exc:
+            print(f"✗ MapReduce pipeline error: {exc}")
+            import traceback; traceback.print_exc()
             return False
-
         finally:
             self.disconnect_db()
 
-    # ── Internal Map+Shuffle ──────────────────────────────────────────────────
+    # ── HDFS setup ────────────────────────────────────────────────────────────
 
-    def _map_and_shuffle_file(self, file_path):
-        """
-        Stream one file in batches, apply all three mappers per record,
-        and accumulate the intermediate (key→values) stores.
-        """
-        for batch_id, records, malformed in parse_file_in_batches(file_path, self.batch_size):
-            self.batch_count += 1
-            self.total_records += len(records)
-            self.malformed_records += malformed
+    def _prepare_hdfs_input(self):
+        _hdfs("-rm", "-r", "-f", f"{HDFS_INPUT}/{self.run_id}")
+        _hdfs("-mkdir", "-p", f"{HDFS_INPUT}/{self.run_id}")
 
-            # MAP phase for this batch
-            pairs_q1 = []
-            pairs_q2 = []
-            pairs_q3 = []
-
-            for record in records:
-                k1, v1 = mapper_query1(record)
-                pairs_q1.append((k1, v1))
-
-                k2, v2 = mapper_query2(record)
-                pairs_q2.append((k2, v2))
-
-                k3, v3 = mapper_query3(record)
-                pairs_q3.append((k3, v3))
-
-            # SHUFFLE phase – merge into global intermediate stores
-            for key, value in pairs_q1:
-                self._intermediate_q1[key].append(value)
-            for key, value in pairs_q2:
-                self._intermediate_q2[key].append(value)
-            for key, value in pairs_q3:
-                self._intermediate_q3[key].append(value)
-
-            print(f"    Batch {self.batch_count}: mapped {len(records)} records "
-                  f"({malformed} malformed)")
-
-    # ── Internal Reduce ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _reduce_all(intermediate, reducer_fn):
-        """
-        Apply reducer_fn to each (key, values) group in intermediate dict.
-        Returns list of result dicts.
-        """
-        results = []
-        for key, values in intermediate.items():
-            result = reducer_fn(key, values)
-            results.append(result)
+    def _parallel_upload_to_hdfs(self) -> dict:
+        results: dict = {}
+        lock = threading.Lock()
+        threads = []
+        for i, local_path in enumerate(self.data_files, start=1):
+            filename  = os.path.basename(local_path)
+            hdfs_path = f"{HDFS_INPUT}/{self.run_id}/{filename}"
+            t = threading.Thread(
+                target=_upload_file_to_hdfs,
+                args=(local_path, hdfs_path, i, results, lock),
+                name=f"HDFSUpload-{i}",
+                daemon=True,
+            )
+            threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
         return results
 
-    # ── Load results into relational DB ──────────────────────────────────────
+    def _count_records_locally(self):
+        """Quick local scan to get record counts (not the MapReduce step)."""
+        from parser import parse_file_in_batches
+        for file_path in self.data_files:
+            for _, records, malformed in parse_file_in_batches(
+                file_path, self.batch_size
+            ):
+                self.total_records    += len(records)
+                self.malformed_records += malformed
 
-    def _load_results(self, results_q1, results_q2, results_q3, execution_timestamp):
-        """
-        Insert a parent row into query_results, then insert per-query result rows.
-        Mirrors the load pattern used by the MongoDB pipeline.
-        """
-        elapsed_ms = int((time.time() - self.start_time) * 1000)
+    # ── Hadoop Streaming job ──────────────────────────────────────────────────
 
-        # Parent row in query_results
-        self.db_manager.execute_update("""
-            INSERT INTO query_results (
-                run_id, pipeline_name, query_id, query_name,
-                batch_id, batch_size, avg_batch_size,
-                execution_time_ms, execution_timestamp,
-                malformed_records, total_records_processed, result_json
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            self.run_id,
-            self.pipeline_name,
-            1,
-            "all_queries",
-            self.batch_count,
-            self.batch_size,
-            self.total_records / self.batch_count if self.batch_count else 0,
-            elapsed_ms,
-            execution_timestamp,
-            self.malformed_records,
-            self.total_records,
-            json.dumps({"summary": "all queries executed via MapReduce"})
-        ))
+    def _run_streaming_job(self, hdfs_output: str) -> bool:
+        mapper_script  = os.path.join(MR_SCRIPTS_DIR, "mapper.py")
+        reducer_script = os.path.join(MR_SCRIPTS_DIR, "reducer.py")
+        parser_script  = "parser.py"
 
-        # Query-specific result rows
-        self.db_manager.insert_daily_traffic_results(
-            results_q1, self.run_id, self.pipeline_name, 1, execution_timestamp
-        )
-        self.db_manager.insert_top_resources_results(
-            results_q2, self.run_id, self.pipeline_name, 1, execution_timestamp
-        )
-        self.db_manager.insert_error_analysis_results(
-            results_q3, self.run_id, self.pipeline_name, 1, execution_timestamp
-        )
+        # Build -input args for all uploaded files
+        input_args = []
+        for local_path in self.data_files:
+            filename = os.path.basename(local_path)
+            input_args += ["-input", f"{HDFS_INPUT}/{self.run_id}/{filename}"]
 
-        print("  ✓ Results stored in relational database")
+        cmd = [
+            HADOOP_BIN, "jar", STREAMING_JAR,
+            *input_args,
+            "-output",  hdfs_output,
+            "-mapper",  f"python3 mapper.py",
+            "-reducer", f"python3 reducer.py",
+            "-file",    mapper_script,
+            "-file",    reducer_script,
+            "-file",    parser_script,
+            # Sort by full line so all query tags group correctly
+            "-jobconf", "stream.num.map.output.key.fields=3",
+            "-jobconf", "mapreduce.job.reduces=4",
+        ]
+
+        print(f"  CMD: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=False, text=True)
+        return result.returncode == 0
+
+    # ── Collect results ───────────────────────────────────────────────────────
+
+    def _collect_results(self, hdfs_output: str):
+        r = _hdfs("-cat", f"{hdfs_output}/part-*")
+        if r.returncode != 0:
+            raise RuntimeError(f"Could not read HDFS output: {r.stderr}")
+
+        q1_rows, q2_rows, q3_rows = [], [], []
+        for line in r.stdout.splitlines():
+            if not line.strip():
+                continue
+            tag, _, json_str = line.partition("\t")
+            try:
+                obj = json.loads(json_str)
+            except json.JSONDecodeError:
+                continue
+            if tag == "RESULT_Q1":
+                q1_rows.append(obj)
+            elif tag == "RESULT_Q2":
+                q2_rows.append(obj)
+            elif tag == "RESULT_Q3":
+                q3_rows.append(obj)
+
+        print(f"  Q1 rows: {len(q1_rows)}, Q2 rows: {len(q2_rows)}, Q3 rows: {len(q3_rows)}")
+        return q1_rows, q2_rows, q3_rows

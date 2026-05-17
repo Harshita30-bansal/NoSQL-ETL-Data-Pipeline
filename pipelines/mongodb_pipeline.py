@@ -1,127 +1,135 @@
 """
-MongoDB Pipeline - ETL using MongoDB NoSQL database
-Loads parsed logs into MongoDB and executes aggregation queries
+pipelines/mongodb_pipeline.py
+──────────────────────────────────────────────────────────────────
+MongoDB ETL pipeline.
+
+• Both log files are loaded into MongoDB in parallel (2 batches).
+• Three aggregation pipelines produce Q1/Q2/Q3 results.
+• Results are stored in PostgreSQL via DBManager.
 """
 
+import json
 import time
 from datetime import datetime
+
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
-import json
+
 from src.base_pipeline import BasePipeline
-from parser import parse_file_in_batches
+from src.parallel_batch_loader import load_files_parallel
 from config import MONGO_CONFIG, ERROR_STATUS_MIN, ERROR_STATUS_MAX
 
 
 class MongoDBPipeline(BasePipeline):
-    def __init__(self, data_file, batch_size=5000, db_type='mysql'):
-        super().__init__('MongoDB', data_file, batch_size, db_type)
 
-        #  SUPPORT MULTIPLE FILES
-        if isinstance(data_file, list):
-            self.data_files = data_file
-        else:
-            self.data_files = [data_file]
-
-        self.mongo_config = MONGO_CONFIG
+    def __init__(self, data_file, batch_size=5000, db_type="postgresql"):
+        super().__init__("MongoDB", data_file, batch_size, db_type)
+        self.data_files   = data_file if isinstance(data_file, list) else [data_file]
         self.mongo_client = None
-        self.mongo_db = None
+        self.mongo_db     = None
 
-    def execute(self):
+    # ── execute ───────────────────────────────────────────────────────────────
+
+    def execute(self) -> bool:
         print(f"\n{'='*60}")
-        print(f"Executing {self.pipeline_name} Pipeline")
+        print(f"Executing MongoDB Pipeline")
         print(f"{'='*60}\n")
 
         self.start_time = time.time()
 
         if not self.connect_db():
-            print("✗ Failed to connect to relational database")
             return False
 
         if not self._connect_mongodb():
-            print("✗ Failed to connect to MongoDB")
+            self.disconnect_db()
             return False
 
         try:
             execution_timestamp = datetime.now()
 
-            print("  Initializing MongoDB collections...")
-            self._initialize_collections()
+            # Step 1: Init collection
+            print("Step 1: Initializing MongoDB collection…")
+            self._initialize_collection()
 
-            print("  Loading logs into MongoDB...")
-            self._load_logs_to_mongodb()
+            # Step 2: Load both files in parallel (one thread per file = one batch each)
+            print("\nStep 2: Loading logs into MongoDB in parallel (2 batches)…")
+            collection = self.mongo_db[MONGO_CONFIG["collections"]["logs"]]
 
-            print("  Executing aggregation queries...")
-            results = self._execute_queries()
-
-            print("  Storing results in relational database...")
-
-            # Insert ONE parent row
-            self.db_manager.execute_update("""
-                INSERT INTO query_results (
-                    run_id, pipeline_name, query_id, query_name,
-                    batch_id, batch_size, avg_batch_size,
-                    execution_time_ms, execution_timestamp,
-                    malformed_records, total_records_processed, result_json
+            def _insert_batch(batch_number: int, records: list, malformed: int):
+                """Called from parallel_batch_loader under a lock."""
+                if records:
+                    collection.insert_many(records, ordered=False)
+                self.total_records     += len(records)
+                self.malformed_records += malformed
+                self.batch_count       += 1
+                print(
+                    f"  [Batch {batch_number}] inserted {len(records)} records "
+                    f"({malformed} malformed)"
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                self.run_id,
-                self.pipeline_name,
-                1,
-                "all_queries",
-                1,
-                self.batch_size,
-                self.batch_size,
-                int((time.time() - self.start_time) * 1000),
-                execution_timestamp,
-                self.malformed_records,
-                self.total_records,
-                json.dumps({"summary": "all queries executed"})
-            ))
 
-            # Insert query outputs
-            for batch_id, (query_id, query_results) in enumerate(results.items(), 1):
-                if query_id == 'query_1':
-                    self.db_manager.insert_daily_traffic_results(
-                        query_results, self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                    )
-                elif query_id == 'query_2':
-                    self.db_manager.insert_top_resources_results(
-                        query_results, self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                    )
-                elif query_id == 'query_3':
-                    self.db_manager.insert_error_analysis_results(
-                        query_results, self.run_id, self.pipeline_name, batch_id, execution_timestamp
-                    )
+            load_files_parallel(
+                file_paths=self.data_files,
+                batch_size=self.batch_size,
+                process_fn=_insert_batch,
+            )
+            print(f"  ✓ Total inserted: {self.total_records:,} records")
+
+            # Step 3: Run aggregation queries
+            print("\nStep 3: Running MongoDB aggregations…")
+            q1_rows = self._query1(collection)
+            q2_rows = self._query2(collection)
+            q3_rows = self._query3(collection)
+
+            # Rank Q2
+            for rank, row in enumerate(q2_rows, 1):
+                row["rank"] = rank
+
+            # Step 4: Store in PostgreSQL
+            print("\nStep 4: Storing results in PostgreSQL…")
+            elapsed_ms = int((time.time() - self.start_time) * 1000)
+            self.db_manager.insert_parent_result(
+                self.run_id, self.pipeline_name,
+                self.batch_count, self.batch_size,
+                self.total_records, self.malformed_records,
+                elapsed_ms, execution_timestamp,
+                extra_json={"mode": "mongodb_aggregation"},
+            )
+            self.db_manager.insert_daily_traffic_results(
+                q1_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+            self.db_manager.insert_top_resources_results(
+                q2_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+            self.db_manager.insert_error_analysis_results(
+                q3_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
 
             self.end_time = time.time()
             self.save_metadata()
-
             print(self.get_status_string())
             return True
 
-        except Exception as e:
-            print(f"✗ Pipeline execution failed: {e}")
-            self.end_time = time.time()
+        except Exception as exc:
+            print(f"✗ MongoDB pipeline failed: {exc}")
+            import traceback; traceback.print_exc()
             return False
+
         finally:
             self.disconnect_db()
             self._disconnect_mongodb()
 
-    def _connect_mongodb(self):
+    # ── MongoDB helpers ───────────────────────────────────────────────────────
+
+    def _connect_mongodb(self) -> bool:
         try:
             self.mongo_client = MongoClient(
-                self.mongo_config['host'],
-                self.mongo_config['port'],
-                serverSelectionTimeoutMS=5000
+                MONGO_CONFIG["host"],
+                MONGO_CONFIG["port"],
+                serverSelectionTimeoutMS=5000,
             )
-            self.mongo_db = self.mongo_client[self.mongo_config['database']]
-            self.mongo_db.command('ping')
+            self.mongo_db = self.mongo_client[MONGO_CONFIG["database"]]
+            self.mongo_db.command("ping")
             print("✓ Connected to MongoDB")
             return True
-        except ConnectionFailure as e:
-            print(f"✗ MongoDB connection failed: {e}")
+        except ConnectionFailure as exc:
+            print(f"✗ MongoDB connection failed: {exc}")
             return False
 
     def _disconnect_mongodb(self):
@@ -129,136 +137,105 @@ class MongoDBPipeline(BasePipeline):
             self.mongo_client.close()
             print("✓ Disconnected from MongoDB")
 
-    def _initialize_collections(self):
-        collection = self.mongo_db[self.mongo_config['collections']['logs']]
-        collection.delete_many({})
-        collection.create_index([('log_date', 1), ('log_hour', 1)])
-        collection.create_index([('resource_path', 1)])
-        collection.create_index([('host', 1)])
-        collection.create_index([('status_code', 1)])
-        print("  ✓ MongoDB collection initialized")
+    def _initialize_collection(self):
+        col = self.mongo_db[MONGO_CONFIG["collections"]["logs"]]
+        col.drop()
+        col.create_index([("log_date", 1), ("log_hour", 1)])
+        col.create_index([("resource_path", 1)])
+        col.create_index([("host", 1)])
+        col.create_index([("status_code", 1)])
+        print("  ✓ MongoDB collection initialised")
 
-    # ✅ UPDATED: MULTI-FILE LOADING
-    def _load_logs_to_mongodb(self):
-        collection = self.mongo_db[self.mongo_config['collections']['logs']]
+    # ── Aggregation queries ───────────────────────────────────────────────────
 
-        for file in self.data_files:
-            print(f"  Processing file: {file}")
-
-            for batch_id, records, malformed in parse_file_in_batches(file, self.batch_size):
-                self.batch_count += 1
-                self.total_records += len(records)
-                self.malformed_records += malformed
-
-                if records:
-                    collection.insert_many(records)
-                    print(f"  Batch {self.batch_count}: inserted {len(records)} records")
-
-    def _execute_queries(self):
-        collection = self.mongo_db[self.mongo_config['collections']['logs']
-        ]
-
-        return {
-            'query_1': self._query_1_aggregation(collection),
-            'query_2': self._query_2_aggregation(collection),
-            'query_3': self._query_3_aggregation(collection)
-        }
-
-    def _query_1_aggregation(self, collection):
-        return list(collection.aggregate([
-            {'$group': {
-                '_id': {'log_date': '$log_date', 'status_code': '$status_code'},
-                'request_count': {'$sum': 1},
-                'total_bytes': {'$sum': '$bytes_transferred'}
+    def _query1(self, col) -> list:
+        rows = list(col.aggregate([
+            {"$group": {
+                "_id": {"log_date": "$log_date", "status_code": "$status_code"},
+                "request_count": {"$sum": 1},
+                "total_bytes":   {"$sum": "$bytes_transferred"},
             }},
-            {'$project': {
-                '_id': 0,
-                'log_date': '$_id.log_date',
-                'status_code': '$_id.status_code',
-                'request_count': 1,
-                'total_bytes': 1
+            {"$project": {
+                "_id": 0,
+                "log_date":      "$_id.log_date",
+                "status_code":   "$_id.status_code",
+                "request_count": 1,
+                "total_bytes":   1,
             }},
-            {'$sort': {'log_date': 1, 'status_code': 1}}
+            {"$sort": {"log_date": 1, "status_code": 1}},
         ]))
+        print(f"  Q1: {len(rows)} rows")
+        return rows
 
-    def _query_2_aggregation(self, collection):
-        return list(collection.aggregate([
-            {'$match': {'resource_path': {'$ne': None}}},
-            {'$group': {
-                '_id': '$resource_path',
-                'request_count': {'$sum': 1},
-                'total_bytes': {'$sum': '$bytes_transferred'},
-                'hosts': {'$addToSet': '$host'}
+    def _query2(self, col) -> list:
+        rows = list(col.aggregate([
+            {"$match": {"resource_path": {"$ne": None}}},
+            {"$group": {
+                "_id":           "$resource_path",
+                "request_count": {"$sum": 1},
+                "total_bytes":   {"$sum": "$bytes_transferred"},
+                "hosts":         {"$addToSet": "$host"},
             }},
-            {'$project': {
-                '_id': 0,
-                'resource_path': '$_id',
-                'request_count': 1,
-                'total_bytes': 1,
-                'distinct_host_count': {'$size': '$hosts'}
+            {"$project": {
+                "_id": 0,
+                "resource_path":      "$_id",
+                "request_count":      1,
+                "total_bytes":        1,
+                "distinct_host_count": {"$size": "$hosts"},
             }},
-            {'$sort': {'request_count': -1}},
-            {'$limit': 20}
+            {"$sort": {"request_count": -1}},
+            {"$limit": 20},
         ]))
+        print(f"  Q2: {len(rows)} rows")
+        return rows
 
-    # ✅ FRIEND’S CORRECT LOGIC
-    def _query_3_aggregation(self, collection):
-        results = list(collection.aggregate([
-            {
-                '$group': {
-                    '_id': {'log_date': '$log_date', 'log_hour': '$log_hour'},
-
-                    'total_request_count': {'$sum': 1},
-
-                    'error_request_count': {
-                        '$sum': {
-                            '$cond': [
-                                {'$and': [
-                                    {'$gte': ['$status_code', ERROR_STATUS_MIN]},
-                                    {'$lte': ['$status_code', ERROR_STATUS_MAX]}
-                                ]},
-                                1, 0
-                            ]
-                        }
-                    },
-
-                    'error_hosts': {
-                        '$addToSet': {
-                            '$cond': [
-                                {'$and': [
-                                    {'$gte': ['$status_code', ERROR_STATUS_MIN]},
-                                    {'$lte': ['$status_code', ERROR_STATUS_MAX]}
-                                ]},
-                                '$host',
-                                '$$REMOVE'
-                            ]
-                        }
-                    }
-                }
-            },
-            {
-                '$project': {
-                    '_id': 0,
-                    'log_date': '$_id.log_date',
-                    'log_hour': '$_id.log_hour',
-                    'error_request_count': 1,
-                    'total_request_count': 1,
-                    'error_rate': {
-                        '$cond': [
-                            {'$gt': ['$total_request_count', 0]},
-                            {'$divide': ['$error_request_count', '$total_request_count']},
-                            0
+    def _query3(self, col) -> list:
+        rows = list(col.aggregate([
+            {"$group": {
+                "_id": {"log_date": "$log_date", "log_hour": "$log_hour"},
+                "total_request_count": {"$sum": 1},
+                "error_request_count": {
+                    "$sum": {
+                        "$cond": [
+                            {"$and": [
+                                {"$gte": ["$status_code", ERROR_STATUS_MIN]},
+                                {"$lte": ["$status_code", ERROR_STATUS_MAX]},
+                            ]},
+                            1, 0,
                         ]
-                    },
-                    'distinct_error_hosts': {
-                        '$size': '$error_hosts'
                     }
-                }
-            },
-            {'$sort': {'log_date': 1, 'log_hour': 1}}
+                },
+                "error_hosts": {
+                    "$addToSet": {
+                        "$cond": [
+                            {"$and": [
+                                {"$gte": ["$status_code", ERROR_STATUS_MIN]},
+                                {"$lte": ["$status_code", ERROR_STATUS_MAX]},
+                            ]},
+                            "$host", "$$REMOVE",
+                        ]
+                    }
+                },
+            }},
+            {"$project": {
+                "_id": 0,
+                "log_date":             "$_id.log_date",
+                "log_hour":             "$_id.log_hour",
+                "error_request_count":  1,
+                "total_request_count":  1,
+                "error_rate": {
+                    "$cond": [
+                        {"$gt": ["$total_request_count", 0]},
+                        {"$divide": ["$error_request_count",
+                                     "$total_request_count"]},
+                        0,
+                    ]
+                },
+                "distinct_error_hosts": {"$size": "$error_hosts"},
+            }},
+            {"$sort": {"log_date": 1, "log_hour": 1}},
         ]))
-
-        for r in results:
-            r['error_rate'] = round(r['error_rate'], 4)
-
-        return results
+        for r in rows:
+            r["error_rate"] = round(r["error_rate"], 4)
+        print(f"  Q3: {len(rows)} rows")
+        return rows
