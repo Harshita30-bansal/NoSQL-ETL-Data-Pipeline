@@ -2,7 +2,7 @@
 
 ## 🎯 Project Overview
 
-**Resume-Grade NoSQL Systems Project** — A comprehensive ETL framework analyzing NASA HTTP logs across **4 different data processing paradigms**:
+**NoSQL Systems Project** — A comprehensive ETL framework analyzing NASA HTTP logs across **4 different data processing paradigms**:
 - ✓ Apache Pig
 - ✓ Apache MapReduce  
 - ✓ MongoDB (NoSQL)
