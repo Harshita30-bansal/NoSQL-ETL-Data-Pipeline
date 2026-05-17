@@ -5,7 +5,7 @@ Run this once before executing pipelines
 
 import os
 import sys
-from config import DB_CONFIG, DEFAULT_DB
+from config import DB_CONFIG
 import pymysql
 
 

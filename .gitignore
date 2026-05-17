@@ -6,16 +6,18 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Jupyter (if any)
+# Jupyter
 .ipynb_checkpoints/
 
 # Logs
 *.log
+logs/
 
 # OS/editor
 .DS_Store
 Thumbs.db
 .vscode/
+.idea/
 
 # Environment files
 .env
@@ -23,3 +25,24 @@ Thumbs.db
 # Large dataset
 data/*.gz
 data/NASA_access_log_*
+
+# Java
+*.class
+
+# Hive / Derby
+.metastore_db/
+derby.log
+hive_server.log
+
+# Generated outputs
+output/
+results/
+
+# Reports
+reports/*.pdf
+
+# Hadoop temp
+tmp/
+
+metastore_db/
+hive_scripts/temp/
