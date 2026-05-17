@@ -1,169 +1,190 @@
 """
-Database Manager - handles all database operations for result storage
-Supports both MySQL and PostgreSQL
+db_manager.py – PostgreSQL-only DB manager.
+Replaces the old db_loader.py. Used by base_pipeline and all pipelines.
 """
 
-import pymysql
 import psycopg2
-from datetime import datetime
-import json
-from config import DB_CONFIG, DEFAULT_DB
+import psycopg2.extras
+from datetime import datetime, timezone
+from config import DB_CONFIG
 
 
-class DatabaseManager:
-    def __init__(self, db_type=DEFAULT_DB):
-        self.db_type = db_type
-        self.connection = None
-        self.config = DB_CONFIG[db_type]
+class DBManager:
+    """Handles all PostgreSQL operations for the ETL framework."""
 
-    def connect(self):
-        """Establish database connection"""
+    def __init__(self, db_type: str = "postgresql"):
+        if db_type != "postgresql":
+            raise ValueError("Only 'postgresql' is supported.")
+        self._config = DB_CONFIG["postgresql"]
+        self._conn   = None
+
+    # ── Connection ────────────────────────────────────────────────────────────
+
+    def connect(self) -> bool:
         try:
-            if self.db_type == 'mysql':
-                self.connection = pymysql.connect(
-                    host=self.config['host'],
-                    port=self.config['port'],
-                    user=self.config['user'],
-                    password=self.config['password'],
-                    database=self.config['database'],
-                    charset='utf8mb4',
-                    cursorclass=pymysql.cursors.DictCursor
-                )
-            elif self.db_type == 'postgresql':
-                self.connection = psycopg2.connect(
-                    host=self.config['host'],
-                    port=self.config['port'],
-                    user=self.config['user'],
-                    password=self.config['password'],
-                    database=self.config['database']
-                )
-            print(f"✓ Connected to {self.db_type}")
+            self._conn = psycopg2.connect(**self._config)
+            print("✓ Connected to PostgreSQL")
             return True
         except Exception as e:
-            print(f"✗ Database connection failed: {e}")
+            print(f"✗ PostgreSQL connection failed: {e}")
             return False
 
     def disconnect(self):
-        """Close database connection"""
-        if self.connection:
-            self.connection.close()
-            print(f"✓ Disconnected from {self.db_type}")
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+            print("✓ Disconnected from PostgreSQL")
 
-    def execute_query(self, query, params=None):
-        """Execute a SELECT query and return results as list of dicts"""
-        try:
-            # PostgreSQL requires a DictCursor/RealDictCursor for result['column'] access
-            if self.db_type == 'postgresql':
-                import psycopg2.extras
-                cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            else:
-                cursor = self.connection.cursor()
-                
-            cursor.execute(query, params) if params else cursor.execute(query)
-            results = cursor.fetchall()
-            cursor.close()
-            return results
-        except Exception as e:
-            print(f"✗ Query failed: {e}")
-            return None
+    # ── Generic helpers ───────────────────────────────────────────────────────
 
-    def execute_update(self, query, params=None):
-        """Execute INSERT/UPDATE/DELETE query with explicit error logging"""
-        try:
-            cursor = self.connection.cursor()
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            self.connection.commit()
-            cursor.close()
-            return True
-        except Exception as e:
-            # THIS PRINT IS CRITICAL - it will tell us the exact column causing the fail
-            print(f"✗ Database Error: {e}")
-            if self.connection:
-                self.connection.rollback() # Crucial: Clean the state for the next insert
-            return False
+    def execute_query(self, sql: str, params=None) -> list:
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
 
-    def insert_execution_metadata(self, run_id, pipeline_name, batch_size, total_batches,
-                                   total_records, malformed_records, avg_batch_size,
-                                   execution_time_ms, data_file):
-        """Store execution metadata"""
-        query = """
-            INSERT INTO execution_metadata 
-            (run_id, pipeline_name, batch_size, total_batches, total_records, 
-             malformed_records, avg_batch_size, execution_start, execution_end, 
-             execution_time_ms, data_file)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        now = datetime.now()
-        params = (run_id, pipeline_name, batch_size, total_batches, total_records,
-                  malformed_records, avg_batch_size, now, now, execution_time_ms, data_file)
-        return self.execute_update(query, params)
+    def execute_update(self, sql: str, params=None):
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params)
+        self._conn.commit()
 
-    def insert_daily_traffic_results(self, results_list, run_id, pipeline_name, batch_id, execution_timestamp):
-        # ADD THIS PRINT
-        print(f"  DEBUG: Attempting to insert {len(results_list)} rows for Run: {run_id}")
-        
-        query = """
-            INSERT INTO daily_traffic_summary 
-            (run_id, pipeline_name, log_date, status_code, request_count, total_bytes, batch_id, execution_timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        for result in results_list:
-            params = (run_id, pipeline_name, result['log_date'], result['status_code'],
-                     result['request_count'], result['total_bytes'], batch_id, execution_timestamp)
-            if not self.execute_update(query, params):
-                return False
-        return True
+    # ── run lifecycle ─────────────────────────────────────────────────────────
 
-    def insert_top_resources_results(self, results_list, run_id, pipeline_name, batch_id, execution_timestamp):
-        if not results_list: return True
-        query = """
-            INSERT INTO top_resources 
-            (run_id, pipeline_name, resource_path, request_count, total_bytes, distinct_host_count, rank, batch_id, execution_timestamp)
-            VALUES %s
-        """
-        data = [(run_id, pipeline_name, r['resource_path'], r['request_count'], r['total_bytes'], r['distinct_host_count'], r.get('rank', i+1), batch_id, execution_timestamp) for i, r in enumerate(results_list)]
-        print(f"  DEBUG: Sending {len(data)} rows to top_resources...")
-        return self._execute_batch(query, data)
+    def create_run(self, run_id: str, pipeline: str, batch_size: int,
+                   data_file: str):
+        """Insert a placeholder row into execution_metadata."""
+        now = datetime.now(timezone.utc)
+        self.execute_update(
+            """
+            INSERT INTO execution_metadata (
+                run_id, pipeline_name, batch_size, total_batches,
+                total_records, malformed_records, avg_batch_size,
+                execution_start, execution_end, execution_time_ms, data_file
+            ) VALUES (%s,%s,%s,0,0,0,0,%s,%s,0,%s)
+            """,
+            (run_id, pipeline, batch_size, now, now, data_file),
+        )
 
-    def insert_error_analysis_results(self, results_list, run_id, pipeline_name, batch_id, execution_timestamp):
-        if not results_list: return True
-        query = """
-            INSERT INTO hourly_error_analysis 
-            (run_id, pipeline_name, log_date, log_hour, error_request_count, total_request_count, error_rate, distinct_error_hosts, batch_id, execution_timestamp)
-            VALUES %s
-        """
-        data = [(run_id, pipeline_name, r['log_date'], r['log_hour'], r['error_request_count'], r['total_request_count'], r['error_rate'], r['distinct_error_hosts'], batch_id, execution_timestamp) for r in results_list]
-        print(f"  DEBUG: Sending {len(data)} rows to hourly_error_analysis...")
-        return self._execute_batch(query, data)
+    def finish_run(self, run_id: str, total_records: int, malformed: int,
+                   batch_count: int, avg_batch_size: float, runtime_s: float):
+        """Update execution_metadata with final statistics."""
+        self.execute_update(
+            """
+            UPDATE execution_metadata
+            SET total_records     = %s,
+                malformed_records = %s,
+                total_batches     = %s,
+                avg_batch_size    = %s,
+                execution_time_ms = %s,
+                execution_end     = %s
+            WHERE run_id = %s
+            """,
+            (
+                total_records, malformed, batch_count,
+                avg_batch_size, int(runtime_s * 1000),
+                datetime.now(timezone.utc), run_id,
+            ),
+        )
 
-    def _execute_batch(self, query, data):
-        """Helper for bulk inserts in PostgreSQL"""
-        try:
-            import psycopg2.extras
-            cursor = self.connection.cursor()
-            psycopg2.extras.execute_values(cursor, query, data)
-            self.connection.commit()
-            cursor.close()
-            return True
-        except Exception as e:
-            print(f"  ✗ Batch Insert Failed: {e}")
-            self.connection.rollback()
-            return False   
-    
+    # ── Query result inserters ────────────────────────────────────────────────
 
-    def get_execution_history(self, pipeline_name=None):
-        """Retrieve execution history"""
-        if pipeline_name:
-            query = "SELECT * FROM execution_metadata WHERE pipeline_name = %s ORDER BY created_at DESC"
-            return self.execute_query(query, (pipeline_name,))
-        else:
-            query = "SELECT * FROM execution_metadata ORDER BY created_at DESC"
-            return self.execute_query(query)
+    def insert_parent_result(self, run_id, pipeline_name, batch_count,
+                              batch_size, total_records, malformed,
+                              elapsed_ms, execution_timestamp, extra_json=None):
+        """Insert the single parent row in query_results."""
+        import json
+        avg = total_records / batch_count if batch_count else 0
+        self.execute_update(
+            """
+            INSERT INTO query_results (
+                run_id, pipeline_name, query_id, query_name,
+                batch_id, batch_size, avg_batch_size,
+                execution_time_ms, execution_timestamp,
+                malformed_records, total_records_processed, result_json
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                run_id, pipeline_name, 1, "all_queries",
+                batch_count, batch_size, avg,
+                elapsed_ms, execution_timestamp,
+                malformed, total_records,
+                json.dumps(extra_json or {}),
+            ),
+        )
 
-    def get_query_results(self, run_id, query_id):
-        """Retrieve query results for a specific run"""
-        query = "SELECT * FROM query_results WHERE run_id = %s AND query_id = %s"
-        return self.execute_query(query, (run_id, query_id))
+    def insert_daily_traffic_results(self, rows: list, run_id: str,
+                                      pipeline_name: str, batch_id: int,
+                                      execution_timestamp):
+        if not rows:
+            return
+        data = [
+            (run_id, pipeline_name, r["log_date"], r["status_code"],
+             r["request_count"], r["total_bytes"], batch_id, execution_timestamp)
+            for r in rows
+        ]
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO daily_traffic_summary
+                    (run_id, pipeline_name, log_date, status_code,
+                     request_count, total_bytes, batch_id, execution_timestamp)
+                VALUES %s
+                """,
+                data,
+            )
+        self._conn.commit()
+        print(f"  ✓ Stored {len(rows)} rows → daily_traffic_summary")
+
+    def insert_top_resources_results(self, rows: list, run_id: str,
+                                      pipeline_name: str, batch_id: int,
+                                      execution_timestamp):
+        if not rows:
+            return
+        data = [
+            (run_id, pipeline_name, r["resource_path"], r["request_count"],
+             r["total_bytes"], r["distinct_host_count"], r["rank"],
+             batch_id, execution_timestamp)
+            for r in rows
+        ]
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO top_resources
+                    (run_id, pipeline_name, resource_path, request_count,
+                     total_bytes, distinct_host_count, rank,
+                     batch_id, execution_timestamp)
+                VALUES %s
+                """,
+                data,
+            )
+        self._conn.commit()
+        print(f"  ✓ Stored {len(rows)} rows → top_resources")
+
+    def insert_error_analysis_results(self, rows: list, run_id: str,
+                                       pipeline_name: str, batch_id: int,
+                                       execution_timestamp):
+        if not rows:
+            return
+        data = [
+            (run_id, pipeline_name, r["log_date"], r["log_hour"],
+             r["error_request_count"], r["total_request_count"],
+             r["error_rate"], r["distinct_error_hosts"],
+             batch_id, execution_timestamp)
+            for r in rows
+        ]
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO hourly_error_analysis
+                    (run_id, pipeline_name, log_date, log_hour,
+                     error_request_count, total_request_count,
+                     error_rate, distinct_error_hosts,
+                     batch_id, execution_timestamp)
+                VALUES %s
+                """,
+                data,
+            )
+        self._conn.commit()
+        print(f"  ✓ Stored {len(rows)} rows → hourly_error_analysis")
