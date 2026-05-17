@@ -23,8 +23,8 @@ from config import MONGO_CONFIG, ERROR_STATUS_MIN, ERROR_STATUS_MAX
 
 class MongoDBPipeline(BasePipeline):
 
-    def __init__(self, data_file, batch_size=5000, db_type="postgresql"):
-        super().__init__("MongoDB", data_file, batch_size, db_type)
+    def __init__(self, data_file, batch_size=5000, db_type="postgresql", query_name="all"):
+        super().__init__("MongoDB", data_file, batch_size, db_type, query_name)
         self.data_files   = data_file if isinstance(data_file, list) else [data_file]
         self.mongo_client = None
         self.mongo_db     = None
@@ -62,6 +62,8 @@ class MongoDBPipeline(BasePipeline):
             # Track which batch numbers we've already counted so that
             # batch_count = number of files (2), not number of insert chunks.
             batch_numbers_seen = set()
+            batch_record_totals = {}
+            batch_malformed_totals = {}
 
             def _insert_batch(batch_number: int, records: list, malformed: int):
                 """Called from parallel_batch_loader for each insert chunk."""
@@ -69,6 +71,15 @@ class MongoDBPipeline(BasePipeline):
                     collection.insert_many(records, ordered=False)
                 self.total_records     += len(records)
                 self.malformed_records += malformed
+
+                batch_record_totals[batch_number] = (
+                    batch_record_totals.get(batch_number, 0) + len(records)
+                )
+
+                batch_malformed_totals[batch_number] = (
+                    batch_malformed_totals.get(batch_number, 0) + malformed
+                )
+
                 # Only count each file (batch_number) once, not every chunk
                 if batch_number not in batch_numbers_seen:
                     batch_numbers_seen.add(batch_number)
@@ -83,14 +94,44 @@ class MongoDBPipeline(BasePipeline):
                 batch_size=self.batch_size,
                 process_fn=_insert_batch,
             )
-            print(f"  ✓ Total inserted : {self.total_records:,} records")
-            print(f"  ✓ Logical batches: {self.batch_count} (July + August)")
+            print(f"  Total inserted : {self.total_records:,} records")
+            print(f"  Logical batches: {self.batch_count} (July + August)")
+
+            # Store ONE metadata row per logical batch (file)
+            for batch_id in batch_record_totals:
+
+                self.db_manager.insert_batch_metadata(
+                    run_id=self.run_id,
+                    pipeline_name=self.pipeline_name,
+                    batch_id=batch_id,
+                    batch_size=self.batch_size,
+                    records_processed=batch_record_totals[batch_id],
+                    malformed_records=batch_malformed_totals[batch_id],
+                    execution_timestamp=execution_timestamp,
+                )
+
+                self.db_manager.insert_malformed_summary(
+                    run_id=self.run_id,
+                    pipeline_name=self.pipeline_name,
+                    batch_id=batch_id,
+                    malformed_count=batch_malformed_totals[batch_id],
+                    execution_timestamp=execution_timestamp,
+                )
 
             # Step 3: Run aggregation queries
             print("\nStep 3: Running MongoDB aggregations…")
-            q1_rows = self._query1(collection)
-            q2_rows = self._query2(collection)
-            q3_rows = self._query3(collection)
+            q1_rows = []
+            q2_rows = []
+            q3_rows = []
+
+            if self.query_name in ("query1", "all"):
+                q1_rows = self._query1(collection)
+
+            if self.query_name in ("query2", "all"):
+                q2_rows = self._query2(collection)
+
+            if self.query_name in ("query3", "all"):
+                q3_rows = self._query3(collection)
 
             # Rank Q2
             for rank, row in enumerate(q2_rows, 1):
@@ -100,10 +141,15 @@ class MongoDBPipeline(BasePipeline):
             print("\nStep 4: Storing results in PostgreSQL…")
             elapsed_ms = int((time.time() - self.start_time) * 1000)
             self.db_manager.insert_parent_result(
-                self.run_id, self.pipeline_name,
-                self.batch_count, self.batch_size,
-                self.total_records, self.malformed_records,
-                elapsed_ms, execution_timestamp,
+                run_id=self.run_id,
+                pipeline_name=self.pipeline_name,
+                query_name=self.query_name,
+                batch_count=self.batch_count,
+                batch_size=self.batch_size,
+                total_records=self.total_records,
+                malformed=self.malformed_records,
+                elapsed_ms=elapsed_ms,
+                execution_timestamp=execution_timestamp,
                 extra_json={"mode": "mongodb_aggregation"},
             )
             self.db_manager.insert_daily_traffic_results(
@@ -174,7 +220,6 @@ class MongoDBPipeline(BasePipeline):
                 "request_count": 1,
                 "total_bytes":   1,
             }},
-            {"$sort": {"log_date": 1, "status_code": 1}},
         ]))
         print(f"  Q1: {len(rows)} rows")
         return rows
@@ -245,7 +290,6 @@ class MongoDBPipeline(BasePipeline):
                 },
                 "distinct_error_hosts": {"$size": "$error_hosts"},
             }},
-            {"$sort": {"log_date": 1, "log_hour": 1}},
         ]))
         for r in rows:
             r["error_rate"] = round(r["error_rate"], 4)
