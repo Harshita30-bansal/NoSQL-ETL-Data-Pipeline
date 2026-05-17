@@ -23,6 +23,14 @@ class Orchestrator:
         self.current_batch_size = BATCH_SIZES[1]             # 5000
         self.db_type            = "postgresql"
         self.last_run_id        = None
+        self.current_query = "all"
+
+        self.query_options = {
+            "1": ("query1", "Daily Traffic Summary"),
+            "2": ("query2", "Top Requested Resources"),
+            "3": ("query3", "Hourly Error Analysis"),
+            "4": ("all",    "Execute All Queries")
+        }
 
     # ── menus ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +68,21 @@ class Orchestrator:
             pass
         print("  Invalid choice – keeping previous setting.")
 
+    def select_query(self):
+        print("\nSelect query to execute:")
+        print("  1. Query 1 – Daily Traffic Summary")
+        print("  2. Query 2 – Top Requested Resources")
+        print("  3. Query 3 – Hourly Error Analysis")
+        print("  4. Execute All Queries")
+
+        choice = input("Enter choice (1-4): ").strip()
+
+        if choice in self.query_options:
+            self.current_query = self.query_options[choice][0]
+            print(f"  Selected: {self.query_options[choice][1]}")
+        else:
+            print("  Invalid choice – keeping previous selection.")
+
     # ── pipeline execution ────────────────────────────────────────────────────
 
     def execute_pipeline(self, pipeline_class):
@@ -76,10 +99,12 @@ class Orchestrator:
                 return
 
         try:
+            self.select_query()
             pipeline = pipeline_class(
                 data_file  = self.current_data_files,
                 batch_size = self.current_batch_size,
                 db_type    = self.db_type,
+                query_name  = self.current_query,
             )
             self.last_run_id = pipeline.run_id
             success = pipeline.execute()
