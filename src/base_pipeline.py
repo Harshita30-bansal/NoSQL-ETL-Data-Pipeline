@@ -12,11 +12,12 @@ class BasePipeline(ABC):
     """Common state and lifecycle helpers for every pipeline."""
 
     def __init__(self, pipeline_name: str, data_file, batch_size: int,
-                 db_type: str = "postgresql"):
+                 db_type: str = "postgresql", query_name: str = "all"):
         self.pipeline_name  = pipeline_name
         self.data_file      = data_file          # str or list[str]
         self.batch_size     = batch_size
         self.db_type        = "postgresql"       # always PostgreSQL
+        self.query_name = query_name
 
         # Runtime counters
         self.run_id          = str(uuid.uuid4())[:12]
