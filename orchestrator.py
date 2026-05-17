@@ -1,241 +1,169 @@
 """
-Main Orchestrator - central controller for pipeline execution
-Provides CLI interface for selecting pipelines and running ETL jobs
+orchestrator.py – Central CLI controller for the ETL pipeline framework.
+Supports: Pig, MapReduce (Hadoop), MongoDB, Hive
+Database: PostgreSQL only
+Batching: July file = Batch 1, August file = Batch 2 (loaded in parallel)
 """
 
 import os
 import sys
-import time
-from datetime import datetime
-from config import PIPELINES, DATA_FILES, BATCH_SIZES, QUERIES
-from src.base_pipeline import PythonNativePipeline
-from pipelines.pig_pipeline import PigPipeline
+from config import PIPELINES, DATA_FILES, BATCH_SIZES
+from pipelines.pig_pipeline       import PigPipeline
 from pipelines.mapreduce_pipeline import MapReducePipeline
-from pipelines.mongodb_pipeline import MongoDBPipeline
-from pipelines.hive_pipeline import HivePipeline
-from reports.reporter import Reporter
+from pipelines.mongodb_pipeline   import MongoDBPipeline
+from pipelines.hive_pipeline      import HivePipeline
+from reports.reporter             import Reporter
 
 
 class Orchestrator:
-    """Main orchestrator for ETL pipeline execution"""
+    """Main orchestrator for ETL pipeline execution."""
 
     def __init__(self):
-        self.current_pipeline = None
-        self.current_data_file = None
-        self.current_batch_size = None
-        self.current_db = 'postgresql'
-        self.run_id = None
+        self.current_data_files = list(DATA_FILES.values())  # both files by default
+        self.current_batch_size = BATCH_SIZES[1]             # 5000
+        self.db_type            = "postgresql"
+        self.last_run_id        = None
+
+    # ── menus ─────────────────────────────────────────────────────────────────
 
     def display_menu(self):
-        
-        print("Choose Action to perform : ")
+        print("\n" + "="*55)
+        print("  NASA Log ETL Framework  |  DB: PostgreSQL")
+        print("="*55)
+        print("  Batching : July  → Batch 1")
+        print("             August → Batch 2  (loaded in parallel)")
+        print(f"  Batch size : {self.current_batch_size:,} records per chunk")
+        print("="*55)
+        print("  1. Exit")
+        print("  2. Execute Apache Pig Pipeline")
+        print("  3. Execute MapReduce (Hadoop Streaming) Pipeline")
+        print("  4. Execute MongoDB Pipeline")
+        print("  5. Execute Apache Hive Pipeline")
+        print("  6. View Execution History")
+        print("  7. Generate Report")
+        print("  8. Compare Pipelines")
+        print("  9. Change Batch Chunk Size")
+        print("="*55)
 
-        print("1. Exit")
-        print("2. Execute Apache Pig Pipeline")
-        print("3. Execute MapReduce Pipeline")
-        print("4. Execute MongoDB Pipeline")
-        print("5. Execute Apache Hive Pipeline")
-        print("6. View Execution History")
-        print("7. Generate Report")
-        print("8. Compare Pipelines")
-        # print("9. Settings")
-        print()
-
-    def display_settings(self):
-        """Display current settings"""
-        print("CURRENT SETTINGS:")
-        print(f"Database Type: {self.current_db}")
-        print(f"Default Data File: {self.current_data_file or 'Not selected'}")
-        print(f"Default Batch Size: {self.current_batch_size or 'Not selected'}")
-        print()
-
-    def select_data_file(self):
-        """Select input data file"""
-        print("\nSelect data file:")
-        for i, (key, path) in enumerate(DATA_FILES.items(), 1):
-            print(f"  {i}. {key.upper()}: {path}")
-        
-        choice = input("Enter choice (1-{}): ".format(len(DATA_FILES)))
-        
-        files = list(DATA_FILES.items())
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(files):
-                self.current_data_file = list(DATA_FILES.values())
-                print("Selected: ALL FILES (July + August)")
-                return True
-        except ValueError:
-            pass
-        
-        print("Invalid choice")
-        return False
-
-    def select_batch_size(self):
-        """Select batch size"""
-        print("\nSelect batch size:")
+    def change_batch_size(self):
+        print("\nSelect batch chunk size (records per parse chunk):")
         for i, size in enumerate(BATCH_SIZES, 1):
-            print(f"  {i}. {size:,} records")
-        
-        choice = input("Enter choice (1-{}): ".format(len(BATCH_SIZES)))
-        
+            print(f"  {i}. {size:,}")
+        choice = input(f"Enter choice (1-{len(BATCH_SIZES)}): ").strip()
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(BATCH_SIZES):
                 self.current_batch_size = BATCH_SIZES[idx]
-                print(f"Selected: {self.current_batch_size:,} records per batch")
-                return True
+                print(f"  ✓ Batch chunk size set to {self.current_batch_size:,}")
+                return
         except ValueError:
             pass
-        
-        print("Invalid choice")
-        return False
+        print("  Invalid choice – keeping previous setting.")
 
-
-    def settings_menu(self):
-        """Settings menu"""
-        while True:
-            self.display_settings()
-            print("1. Change Data File")
-            print("2. Change Batch Size")
-            print("3. Back to Main Menu")
-            
-            choice = input("Enter choice (1-3): ")
-            
-            if choice == '1':
-                self.select_data_file()
-            elif choice == '2':
-                self.select_batch_size()
-            elif choice == '3':
-                break
-            else:
-                print("Invalid choice")
+    # ── pipeline execution ────────────────────────────────────────────────────
 
     def execute_pipeline(self, pipeline_class):
-        """Execute a pipeline"""
-        if not self.current_data_file:
-            print("Data file not selected. Going to settings...")
-            self.select_data_file()
-        
-        if not self.current_batch_size:
-            print("Batch size not selected. Going to settings...")
-            self.select_batch_size()
+        """Instantiate and run a pipeline with current settings."""
+        print(f"\n  Starting: {pipeline_class.__name__}")
+        print(f"  Files   : {self.current_data_files}")
+        print(f"  Batch chunk size: {self.current_batch_size:,}")
+        print(f"  Database: {self.db_type}\n")
 
-        if isinstance(self.current_data_file, list):
-            for f in self.current_data_file:
-                if not os.path.exists(f):
-                    print(f"Data file not found: {f}")
-                    return
-        else:
-            if not os.path.exists(self.current_data_file):
-                print(f"Data file not found: {self.current_data_file}")
+        # Validate files exist
+        for f in self.current_data_files:
+            if not os.path.exists(f):
+                print(f"  ✗ Data file not found: {f}")
                 return
-
-        print("\n Starting pipeline execution...")
-        print(f"   Pipeline: {pipeline_class.__name__}")
-        print(f"   Data File: {self.current_data_file}")
-        print(f"   Batch Size: {self.current_batch_size:,}")
-        print(f"   Database: {self.current_db}")
 
         try:
             pipeline = pipeline_class(
-                data_file=self.current_data_file,
-                batch_size=self.current_batch_size,
-                db_type=self.current_db
+                data_file  = self.current_data_files,
+                batch_size = self.current_batch_size,
+                db_type    = self.db_type,
             )
-            
-            self.run_id = pipeline.run_id
-            
+            self.last_run_id = pipeline.run_id
             success = pipeline.execute()
-            
+
             if success:
-                print(f"\nPipeline execution completed successfully!")
-                print(f"  Run ID: {self.run_id}")
-                
-                # Offer to generate report
-                choice = input("\nWould you like to generate a report? (y/n): ")
-                if choice.lower() == 'y':
-                    self.generate_report(self.run_id)
+                print(f"\n  ✓ Pipeline completed. Run ID: {self.last_run_id}")
+                choice = input("\n  Generate report now? (y/n): ").strip().lower()
+                if choice == "y":
+                    self.generate_report(self.last_run_id)
             else:
-                print(f"\nPipeline execution failed!")
-        
-        except Exception as e:
-            print(f"Error during pipeline execution: {e}")
+                print("\n  ✗ Pipeline failed.")
 
-    def generate_report(self, run_id=None):
-        """Generate execution report"""
+        except Exception as exc:
+            print(f"  ✗ Unexpected error: {exc}")
+            import traceback; traceback.print_exc()
+
+    # ── reporting ─────────────────────────────────────────────────────────────
+
+    def generate_report(self, run_id: str = None):
         if not run_id:
-            run_id = input("Enter Run ID (or press Enter for latest): ").strip()
-
+            run_id = input("  Enter Run ID (blank = latest): ").strip()
         try:
-            reporter = Reporter(self.current_db)
-            
+            reporter = Reporter(self.db_type)
             if run_id:
                 reporter.generate_full_report(run_id)
             else:
-                # Get latest run
-                query = "SELECT run_id FROM execution_metadata ORDER BY created_at DESC LIMIT 1"
-                results = reporter.db_manager.execute_query(query)
+                results = reporter.db_manager.execute_query(
+                    "SELECT run_id FROM execution_metadata "
+                    "ORDER BY created_at DESC LIMIT 1"
+                )
                 if results:
-                    reporter.generate_full_report(results[0]['run_id'])
+                    reporter.generate_full_report(results[0]["run_id"])
                 else:
-                    print("No executions found")
-        
-        except Exception as e:
-            print(f"Error generating report: {e}")
+                    print("  No executions found.")
+        except Exception as exc:
+            print(f"  ✗ Report error: {exc}")
 
     def view_execution_history(self):
-        """View execution history"""
         try:
-            reporter = Reporter(self.current_db)
+            reporter = Reporter(self.db_type)
             reporter.list_all_executions()
-        except Exception as e:
-            print(f"Error retrieving history: {e}")
+        except Exception as exc:
+            print(f"  ✗ History error: {exc}")
 
     def compare_pipelines(self):
-        """Compare pipeline performance"""
         try:
-            reporter = Reporter(self.current_db)
+            reporter = Reporter(self.db_type)
             reporter.compare_pipelines()
-        except Exception as e:
-            print(f"Error comparing pipelines: {e}")
+        except Exception as exc:
+            print(f"  ✗ Comparison error: {exc}")
+
+    # ── main loop ─────────────────────────────────────────────────────────────
 
     def run(self):
-        """Main loop"""
-        # Set defaults
-        self.current_data_file = list(DATA_FILES.values())
-        self.current_batch_size = BATCH_SIZES[1]  # Default to 5000
-
         while True:
             self.display_menu()
-            choice = input("Enter choice (1-8): ").strip()
+            choice = input("  Enter choice (1-9): ").strip()
 
-            if choice == '1':
-                print("\nGoodbye!")
+            if choice == "1":
+                print("\n  Goodbye!\n")
                 break
-            elif choice == '2':
+            elif choice == "2":
                 self.execute_pipeline(PigPipeline)
-            elif choice == '3':
+            elif choice == "3":
                 self.execute_pipeline(MapReducePipeline)
-            elif choice == '4':
+            elif choice == "4":
                 self.execute_pipeline(MongoDBPipeline)
-            elif choice == '5':
+            elif choice == "5":
                 self.execute_pipeline(HivePipeline)
-            elif choice == '6':
+            elif choice == "6":
                 self.view_execution_history()
-            elif choice == '7':
+            elif choice == "7":
                 self.generate_report()
-            elif choice == '8':
+            elif choice == "8":
                 self.compare_pipelines()
-            # elif choice == '9':
-            #     self.settings_menu()
+            elif choice == "9":
+                self.change_batch_size()
             else:
-                print("Invalid choice. Please try again.")
+                print("  Invalid choice. Please enter 1-9.")
 
-            input("\nPress Enter to continue...")
+            input("\n  Press Enter to continue…")
 
 
 def main():
-    """Entry point"""
     orchestrator = Orchestrator()
     orchestrator.run()
 
