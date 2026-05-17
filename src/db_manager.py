@@ -87,12 +87,19 @@ class DBManager:
 
     # ── Query result inserters ────────────────────────────────────────────────
 
-    def insert_parent_result(self, run_id, pipeline_name, batch_count,
+    def insert_parent_result(self, run_id, pipeline_name, query_name, batch_count,
                               batch_size, total_records, malformed,
                               elapsed_ms, execution_timestamp, extra_json=None):
         """Insert the single parent row in query_results."""
         import json
         avg = total_records / batch_count if batch_count else 0
+        query_id = {
+            "query1": 1,
+            "query2": 2,
+            "query3": 3,
+            "all": 0
+        }.get(query_name, 0)
+
         self.execute_update(
             """
             INSERT INTO query_results (
@@ -103,7 +110,7 @@ class DBManager:
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                run_id, pipeline_name, 1, "all_queries",
+                run_id, pipeline_name, query_id, query_name,
                 batch_count, batch_size, avg,
                 elapsed_ms, execution_timestamp,
                 malformed, total_records,
@@ -188,3 +195,65 @@ class DBManager:
             )
         self._conn.commit()
         print(f"  ✓ Stored {len(rows)} rows → hourly_error_analysis")
+
+    def insert_batch_metadata(
+        self,
+        run_id,
+        pipeline_name,
+        batch_id,
+        batch_size,
+        records_processed,
+        malformed_records,
+        execution_timestamp
+    ):
+        self.execute_update(
+            """
+            INSERT INTO batch_metadata (
+                run_id,
+                pipeline_name,
+                batch_id,
+                batch_size,
+                records_processed,
+                malformed_records,
+                execution_timestamp
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                run_id,
+                pipeline_name,
+                batch_id,
+                batch_size,
+                records_processed,
+                malformed_records,
+                execution_timestamp
+            ),
+        )
+    
+    def insert_malformed_summary(
+        self,
+        run_id,
+        pipeline_name,
+        batch_id,
+        malformed_count,
+        execution_timestamp
+    ):
+        self.execute_update(
+            """
+            INSERT INTO malformed_record_summary (
+                run_id,
+                pipeline_name,
+                batch_id,
+                malformed_record_count,
+                execution_timestamp
+            )
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (
+                run_id,
+                pipeline_name,
+                batch_id,
+                malformed_count,
+                execution_timestamp
+            ),
+        )
