@@ -26,7 +26,21 @@ class Reporter:
             print("  No metadata found for this run ID.")
             return
         m = meta[0]
+
+        query_meta = self.db_manager.execute_query(
+            """
+            SELECT query_name
+            FROM query_results
+            WHERE run_id = %s
+            LIMIT 1
+            """,
+            (run_id,)
+        )
+
+        query_name = query_meta[0]["query_name"] if query_meta else "all"
+
         print(f"\n  Pipeline      : {m['pipeline_name']}")
+        print(f"  Query         : {query_name}")
         print(f"  Start         : {m['execution_start']}")
         print(f"  End           : {m['execution_end']}")
         print(f"  Runtime (ms)  : {m['execution_time_ms']:,}")
@@ -36,9 +50,14 @@ class Reporter:
         print(f"  Avg batch     : {m['avg_batch_size']:,.1f}")
         print(f"  Data file     : {m['data_file']}")
 
-        self._report_q1(run_id)
-        self._report_q2(run_id)
-        self._report_q3(run_id)
+        if query_name in ("query1", "all"):
+            self._report_q1(run_id)
+
+        if query_name in ("query2", "all"):
+            self._report_q2(run_id)
+
+        if query_name in ("query3", "all"):
+            self._report_q3(run_id)
 
     def _report_q1(self, run_id: str):
         rows = self.db_manager.execute_query(
@@ -120,20 +139,28 @@ class Reporter:
     def list_all_executions(self):
         rows = self.db_manager.execute_query(
             """
-            SELECT run_id, pipeline_name, total_records, malformed_records,
-                   execution_time_ms, created_at
-            FROM   execution_metadata
-            ORDER  BY created_at DESC
-            LIMIT  20
+            SELECT e.run_id,
+                e.pipeline_name,
+                q.query_name,
+                e.total_records,
+                e.malformed_records,
+                e.execution_time_ms,
+                e.created_at
+            FROM execution_metadata e
+            LEFT JOIN query_results q
+                ON e.run_id = q.run_id
+            ORDER BY e.created_at DESC
+            LIMIT 20
             """
         )
-        print(f"\n  {'Run ID':<14} {'Pipeline':<12} {'Records':>10} "
+        print(f"\n  {'Run ID':<14} {'Pipeline':<12} {'Query':<10} {'Records':>10} "
               f"{'Malformed':>10} {'ms':>8}  Timestamp")
         print(f"  {'─'*14} {'─'*12} {'─'*10} {'─'*10} {'─'*8}  {'─'*19}")
         for r in rows:
             print(
                 f"  {r['run_id']:<14} "
                 f"{r['pipeline_name']:<12} "
+                f"{r['query_name']:<10} "
                 f"{r['total_records']:>10,} "
                 f"{r['malformed_records']:>10,} "
                 f"{r['execution_time_ms']:>8,}  "
