@@ -96,3 +96,23 @@ CREATE TABLE IF NOT EXISTS hourly_error_analysis (
 
 CREATE INDEX IF NOT EXISTS idx_hea_run_pipeline ON hourly_error_analysis(run_id, pipeline_name);
 CREATE INDEX IF NOT EXISTS idx_hea_date_hour    ON hourly_error_analysis(log_date, log_hour);
+
+CREATE TABLE IF NOT EXISTS batch_metadata (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(32),
+    pipeline_name VARCHAR(50),
+    batch_id INT,
+    batch_size INT,
+    records_processed INT,
+    malformed_records INT,
+    execution_timestamp TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS malformed_record_summary (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(32),
+    pipeline_name VARCHAR(50),
+    batch_id INT,
+    malformed_record_count INT,
+    execution_timestamp TIMESTAMP
+);
