@@ -50,6 +50,30 @@ class Reporter:
         print(f"  Avg batch     : {m['avg_batch_size']:,.1f}")
         print(f"  Data file     : {m['data_file']}")
 
+        batch_rows = self.db_manager.execute_query(
+            """
+            SELECT batch_id,
+                batch_size,
+                records_processed,
+                malformed_records
+            FROM batch_metadata
+            WHERE run_id = %s
+            ORDER BY batch_id
+            """,
+            (run_id,)
+        )
+
+        print("\n  Logical Batch Details")
+        print(f"  {'Batch':<8} {'Batch Size':>12} {'Records':>12} {'Malformed':>12}")
+
+        for b in batch_rows:
+            print(
+                f"  {b['batch_id']:<8} "
+                f"{b['batch_size']:>12,} "
+                f"{b['records_processed']:>12,} "
+                f"{b['malformed_records']:>12,}"
+            )
+
         if query_name in ("query1", "all"):
             self._report_q1(run_id)
 
@@ -145,6 +169,7 @@ class Reporter:
                 e.total_records,
                 e.malformed_records,
                 e.execution_time_ms,
+                e.avg_batch_size,
                 e.created_at
             FROM execution_metadata e
             LEFT JOIN query_results q
@@ -154,7 +179,7 @@ class Reporter:
             """
         )
         print(f"\n  {'Run ID':<14} {'Pipeline':<12} {'Query':<10} {'Records':>10} "
-              f"{'Malformed':>10} {'ms':>8}  Timestamp")
+              f"{'Malformed':>10} {'ms':>8} {'AvgBatch':>12}  Timestamp")
         print(f"  {'─'*14} {'─'*12} {'─'*10} {'─'*10} {'─'*8}  {'─'*19}")
         for r in rows:
             print(
@@ -164,6 +189,7 @@ class Reporter:
                 f"{r['total_records']:>10,} "
                 f"{r['malformed_records']:>10,} "
                 f"{r['execution_time_ms']:>8,}  "
+                f"{r['avg_batch_size']:>12,.1f} "
                 f"{str(r['created_at'])[:19]}"
             )
 
