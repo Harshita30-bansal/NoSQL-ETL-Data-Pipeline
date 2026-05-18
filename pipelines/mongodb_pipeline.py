@@ -104,7 +104,7 @@ class MongoDBPipeline(BasePipeline):
                     run_id=self.run_id,
                     pipeline_name=self.pipeline_name,
                     batch_id=batch_id,
-                    batch_size=self.batch_size,
+                    batch_size=batch_record_totals[batch_id],
                     records_processed=batch_record_totals[batch_id],
                     malformed_records=batch_malformed_totals[batch_id],
                     execution_timestamp=execution_timestamp,
@@ -137,6 +137,13 @@ class MongoDBPipeline(BasePipeline):
             for rank, row in enumerate(q2_rows, 1):
                 row["rank"] = rank
 
+            avg_batch_size = (
+                sum(batch_record_totals.values()) /
+                len(batch_record_totals)
+            )
+
+            largest_batch_size = max(batch_record_totals.values())
+
             # Step 4: Store in PostgreSQL
             print("\nStep 4: Storing results in PostgreSQL…")
             elapsed_ms = int((time.time() - self.start_time) * 1000)
@@ -144,22 +151,28 @@ class MongoDBPipeline(BasePipeline):
                 run_id=self.run_id,
                 pipeline_name=self.pipeline_name,
                 query_name=self.query_name,
-                batch_count=self.batch_count,
-                batch_size=self.batch_size,
-                total_records=self.total_records,
-                malformed=self.malformed_records,
-                elapsed_ms=elapsed_ms,
                 execution_timestamp=execution_timestamp,
                 extra_json={"mode": "mongodb_aggregation"},
             )
             self.db_manager.insert_daily_traffic_results(
-                q1_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q1_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_top_resources_results(
-                q2_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q2_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_error_analysis_results(
-                q3_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q3_rows,
+                self.run_id,
+                self.pipeline_name
+            )
 
             self.end_time = time.time()
+            self.batch_size = largest_batch_size
+            self.avg_batch_size = avg_batch_size
             self.save_metadata()
             print(self.get_status_string())
             return True
