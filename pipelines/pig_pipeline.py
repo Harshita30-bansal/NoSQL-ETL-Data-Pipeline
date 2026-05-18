@@ -70,6 +70,8 @@ class PigPipeline(BasePipeline):
             # ── Step 2: Read metadata (record counts) from Pig output ─────────
             print("\nStep 2: Reading record counts from Pig metadata output...")
             self._read_metadata(out_dir)
+            avg_batch_size = self.total_records / self.batch_count
+            largest_batch_size = avg_batch_size
 
             # Store logical batch metadata
             for batch_id, file_path in enumerate(self.data_files, start=1):
@@ -78,7 +80,7 @@ class PigPipeline(BasePipeline):
                     run_id=self.run_id,
                     pipeline_name=self.pipeline_name,
                     batch_id=batch_id,
-                    batch_size=self.batch_size,
+                    batch_size=self.total_records // self.batch_count,
                     records_processed=self.total_records // self.batch_count,
                     malformed_records=self.malformed_records // self.batch_count,
                     execution_timestamp=execution_timestamp,
@@ -121,22 +123,28 @@ class PigPipeline(BasePipeline):
                 run_id=self.run_id,
                 pipeline_name=self.pipeline_name,
                 query_name=self.query_name,
-                batch_count=self.batch_count,
-                batch_size=self.batch_size,
-                total_records=self.total_records,
-                malformed=self.malformed_records,
-                elapsed_ms=elapsed_ms,
                 execution_timestamp=execution_timestamp,
                 extra_json={"mode": "pig_local"},
             )
             self.db_manager.insert_daily_traffic_results(
-                q1_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q1_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_top_resources_results(
-                q2_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q2_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_error_analysis_results(
-                q3_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q3_rows,
+                self.run_id,
+                self.pipeline_name
+            )
 
             self.end_time = time.time()
+            self.batch_size = largest_batch_size
+            self.avg_batch_size = avg_batch_size
             self.save_metadata()
             print(self.get_status_string())
             return True
