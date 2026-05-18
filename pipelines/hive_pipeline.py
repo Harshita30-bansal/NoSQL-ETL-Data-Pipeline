@@ -1,4 +1,4 @@
-﻿"""
+"""
 Hive Pipeline - ETL using Java-based Hive analytics.
 The Python wrapper compiles and launches a Java engine that processes log files,
 returns query results as JSON, and stores them in PostgreSQL.
@@ -40,34 +40,78 @@ class HivePipeline(BasePipeline):
             q2_rows = result.get('q2', [])
             q3_rows = result.get('q3', [])
             self.total_records = result.get('total_records', 0)
-            self.malformed= result.get('malformed_records', 0)
+            self.malformed_records = result.get('malformed_records', 0)
             self.batch_count = result.get('batch_count', len(self.data_files))
+            avg_batch_size = self.total_records / self.batch_count
+            largest_batch_size = avg_batch_size
             print(
                 f"  ✓ Java analytics returned {self.total_records:,} records "
-                f"({self.malformed:,} malformed)"
+                f"({self.malformed_records:,} malformed)"
             )
             elapsed_ms = int((time.time() - self.start_time) * 1000)
             execution_timestamp = datetime.now()
+
+            for batch_id, file_path in enumerate(self.data_files, start=1):
+
+                estimated_batch_size = (
+                    self.total_records // self.batch_count
+                )
+
+                estimated_malformed = (
+                    self.malformed_records // self.batch_count
+                )
+
+                self.db_manager.insert_batch_metadata(
+                    run_id=self.run_id,
+                    pipeline_name=self.pipeline_name,
+                    batch_id=batch_id,
+                    batch_size=estimated_batch_size,
+                    records_processed=estimated_batch_size,
+                    malformed_records=estimated_malformed,
+                    execution_timestamp=execution_timestamp,
+                )
+
+                self.db_manager.insert_malformed_summary(
+                    run_id=self.run_id,
+                    pipeline_name=self.pipeline_name,
+                    batch_id=batch_id,
+                    malformed_count=estimated_malformed,
+                    execution_timestamp=execution_timestamp,
+                )
            
+          
             self.db_manager.insert_parent_result(
                 run_id=self.run_id,
                 pipeline_name=self.pipeline_name,
                 query_name=self.query_name,
-                batch_count=self.batch_count,
-                batch_size=self.batch_size,
-                total_records=self.total_records,
-                malformed=self.malformed_records,
-                elapsed_ms=elapsed_ms,
                 execution_timestamp=execution_timestamp,
-                extra_json={"mode": "java_hive"},
+                extra_json={
+                    "mode": "java_hive",
+                    "batch_count": self.batch_count,
+                    "batch_size": self.batch_size,
+                    "total_records": self.total_records,
+                    "malformed_records": self.malformed_records,
+                    "elapsed_ms": elapsed_ms
+                },
             )
             self.db_manager.insert_daily_traffic_results(
-                q1_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q1_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_top_resources_results(
-                q2_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q2_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.db_manager.insert_error_analysis_results(
-                q3_rows, self.run_id, self.pipeline_name, 1, execution_timestamp)
+                q3_rows,
+                self.run_id,
+                self.pipeline_name
+            )
             self.end_time = time.time()
+            self.batch_size = largest_batch_size
+            self.avg_batch_size = avg_batch_size
             self.save_metadata()
             print(self.get_status_string())
             return True
