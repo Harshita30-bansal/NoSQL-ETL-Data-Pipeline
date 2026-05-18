@@ -29,13 +29,7 @@ CREATE TABLE IF NOT EXISTS query_results (
     pipeline_name VARCHAR(50)  NOT NULL,
     query_id      INT          NOT NULL,
     query_name    VARCHAR(100) NOT NULL,
-    batch_id      INT          NOT NULL,
-    batch_size    INT          NOT NULL,
-    avg_batch_size FLOAT       NOT NULL,
-    execution_time_ms INT      NOT NULL,
     execution_timestamp TIMESTAMP NOT NULL,
-    malformed_records INT      DEFAULT 0,
-    total_records_processed INT NOT NULL,
     result_json   JSONB,
     created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (run_id) REFERENCES execution_metadata(run_id)
@@ -52,8 +46,6 @@ CREATE TABLE IF NOT EXISTS daily_traffic_summary (
     status_code INT          NOT NULL,
     request_count INT        NOT NULL,
     total_bytes BIGINT       NOT NULL,
-    batch_id    INT          NOT NULL,
-    execution_timestamp TIMESTAMP NOT NULL,
     FOREIGN KEY (run_id) REFERENCES execution_metadata(run_id)
 );
 
@@ -70,8 +62,6 @@ CREATE TABLE IF NOT EXISTS top_resources (
     total_bytes BIGINT        NOT NULL,
     distinct_host_count INT   NOT NULL,
     rank        INT           NOT NULL,
-    batch_id    INT           NOT NULL,
-    execution_timestamp TIMESTAMP NOT NULL,
     FOREIGN KEY (run_id) REFERENCES execution_metadata(run_id)
 );
 
@@ -89,8 +79,6 @@ CREATE TABLE IF NOT EXISTS hourly_error_analysis (
     total_request_count INT  NOT NULL,
     error_rate  FLOAT        NOT NULL,
     distinct_error_hosts INT NOT NULL,
-    batch_id    INT          NOT NULL,
-    execution_timestamp TIMESTAMP NOT NULL,
     FOREIGN KEY (run_id) REFERENCES execution_metadata(run_id)
 );
 
