@@ -87,12 +87,18 @@ class DBManager:
 
     # ── Query result inserters ────────────────────────────────────────────────
 
-    def insert_parent_result(self, run_id, pipeline_name, query_name, batch_count,
-                              batch_size, total_records, malformed,
-                              elapsed_ms, execution_timestamp, extra_json=None):
-        """Insert the single parent row in query_results."""
+    def insert_parent_result(
+        self,
+        run_id,
+        pipeline_name,
+        query_name,
+        execution_timestamp,
+        extra_json=None
+    ):
+        """Insert query execution metadata."""
+
         import json
-        avg = total_records / batch_count if batch_count else 0
+
         query_id = {
             "query1": 1,
             "query2": 2,
@@ -103,29 +109,42 @@ class DBManager:
         self.execute_update(
             """
             INSERT INTO query_results (
-                run_id, pipeline_name, query_id, query_name,
-                batch_id, batch_size, avg_batch_size,
-                execution_time_ms, execution_timestamp,
-                malformed_records, total_records_processed, result_json
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                run_id,
+                pipeline_name,
+                query_id,
+                query_name,
+                execution_timestamp,
+                result_json
+            )
+            VALUES (%s,%s,%s,%s,%s,%s)
             """,
             (
-                run_id, pipeline_name, query_id, query_name,
-                batch_count, batch_size, avg,
-                elapsed_ms, execution_timestamp,
-                malformed, total_records,
+                run_id,
+                pipeline_name,
+                query_id,
+                query_name,
+                execution_timestamp,
                 json.dumps(extra_json or {}),
             ),
         )
 
-    def insert_daily_traffic_results(self, rows: list, run_id: str,
-                                      pipeline_name: str, batch_id: int,
-                                      execution_timestamp):
+    def insert_daily_traffic_results(
+        self,
+        rows: list,
+        run_id: str,
+        pipeline_name: str
+    ):
         if not rows:
             return
         data = [
-            (run_id, pipeline_name, r["log_date"], r["status_code"],
-             r["request_count"], r["total_bytes"], batch_id, execution_timestamp)
+            (
+                run_id,
+                pipeline_name,
+                r["log_date"],
+                r["status_code"],
+                r["request_count"],
+                r["total_bytes"]
+            )
             for r in rows
         ]
         with self._conn.cursor() as cur:
@@ -133,8 +152,8 @@ class DBManager:
                 cur,
                 """
                 INSERT INTO daily_traffic_summary
-                    (run_id, pipeline_name, log_date, status_code,
-                     request_count, total_bytes, batch_id, execution_timestamp)
+                    (run_id, pipeline_name, log_date,
+                    status_code, request_count, total_bytes)
                 VALUES %s
                 """,
                 data,
@@ -143,14 +162,19 @@ class DBManager:
         print(f"  ✓ Stored {len(rows)} rows → daily_traffic_summary")
 
     def insert_top_resources_results(self, rows: list, run_id: str,
-                                      pipeline_name: str, batch_id: int,
-                                      execution_timestamp):
+                                      pipeline_name: str):
         if not rows:
             return
         data = [
-            (run_id, pipeline_name, r["resource_path"], r["request_count"],
-             r["total_bytes"], r["distinct_host_count"], r["rank"],
-             batch_id, execution_timestamp)
+            (
+                run_id,
+                pipeline_name,
+                r["resource_path"],
+                r["request_count"],
+                r["total_bytes"],
+                r["distinct_host_count"],
+                r["rank"]
+            )
             for r in rows
         ]
         with self._conn.cursor() as cur:
@@ -158,9 +182,9 @@ class DBManager:
                 cur,
                 """
                 INSERT INTO top_resources
-                    (run_id, pipeline_name, resource_path, request_count,
-                     total_bytes, distinct_host_count, rank,
-                     batch_id, execution_timestamp)
+                    (run_id, pipeline_name, resource_path,
+                    request_count, total_bytes,
+                    distinct_host_count, rank)
                 VALUES %s
                 """,
                 data,
@@ -169,15 +193,20 @@ class DBManager:
         print(f"  ✓ Stored {len(rows)} rows → top_resources")
 
     def insert_error_analysis_results(self, rows: list, run_id: str,
-                                       pipeline_name: str, batch_id: int,
-                                       execution_timestamp):
+                                       pipeline_name: str):
         if not rows:
             return
         data = [
-            (run_id, pipeline_name, r["log_date"], r["log_hour"],
-             r["error_request_count"], r["total_request_count"],
-             r["error_rate"], r["distinct_error_hosts"],
-             batch_id, execution_timestamp)
+            (
+                run_id,
+                pipeline_name,
+                r["log_date"],
+                r["log_hour"],
+                r["error_request_count"],
+                r["total_request_count"],
+                r["error_rate"],
+                r["distinct_error_hosts"]
+            )
             for r in rows
         ]
         with self._conn.cursor() as cur:
@@ -185,10 +214,10 @@ class DBManager:
                 cur,
                 """
                 INSERT INTO hourly_error_analysis
-                    (run_id, pipeline_name, log_date, log_hour,
-                     error_request_count, total_request_count,
-                     error_rate, distinct_error_hosts,
-                     batch_id, execution_timestamp)
+                    (run_id, pipeline_name, log_date,
+                    log_hour, error_request_count,
+                    total_request_count, error_rate,
+                    distinct_error_hosts)
                 VALUES %s
                 """,
                 data,
