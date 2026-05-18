@@ -28,16 +28,23 @@ public class HiveAnalytics {
         "dd/MMM/yyyy:HH:mm:ss Z", Locale.ENGLISH
     );
     public static void main(String[] args) {
-        if (args.length == 0) {
-            System.err.println("Usage: java HiveAnalytics <log_file> [<log_file> ...]");
+        if (args.length < 2) {
+            System.err.println("Usage: java HiveAnalytics <query_name> <log_file> [<log_file> ...]");
+            System.err.println("       query_name must be one of: query1, query2, query3, all");
+            System.exit(1);
+        }
+        String queryName = args[0].trim().toLowerCase();
+        if (!queryName.equals("query1") && !queryName.equals("query2") && !queryName.equals("query3") && !queryName.equals("all")) {
+            System.err.println("Invalid query_name: " + queryName);
+            System.err.println("Valid values: query1, query2, query3, all");
             System.exit(1);
         }
         List<Path> files = new ArrayList<>();
-        for (String arg : args) {
-            files.add(Paths.get(arg));
+        for (int i = 1; i < args.length; i++) {
+            files.add(Paths.get(args[i]));
         }
         try {
-            Result result = processFiles(files);
+            Result result = processFiles(files, queryName);
             System.out.println(result.toJson());
         } catch (Exception e) {
             System.err.println("✗ HiveAnalytics failed");
@@ -45,10 +52,14 @@ public class HiveAnalytics {
             System.exit(2);
         }
     }
-    private static Result processFiles(List<Path> files) throws IOException {
-        Map<String, Q1Entry> q1 = new TreeMap<>();
-        Map<String, Q2Entry> q2 = new HashMap<>();
-        Map<String, Q3Entry> q3 = new TreeMap<>();
+    private static Result processFiles(List<Path> files, String queryName) throws IOException {
+        boolean computeQ1 = queryName.equals("query1") || queryName.equals("all");
+        boolean computeQ2 = queryName.equals("query2") || queryName.equals("all");
+        boolean computeQ3 = queryName.equals("query3") || queryName.equals("all");
+
+        Map<String, Q1Entry> q1 = computeQ1 ? new TreeMap<>() : null;
+        Map<String, Q2Entry> q2 = computeQ2 ? new HashMap<>() : null;
+        Map<String, Q3Entry> q3 = computeQ3 ? new TreeMap<>() : null;
         int totalRecords = 0;
         int malformedRecords = 0;
         for (Path filePath : files) {
@@ -64,33 +75,45 @@ public class HiveAnalytics {
                         continue;
                     }
                     totalRecords++;
-                    String q1Key = record.logDate + "|" + record.statusCode;
-                    q1.computeIfAbsent(q1Key, k -> new Q1Entry(record.logDate, record.statusCode))
-                      .add(record.bytesTransferred);
-                    q2.computeIfAbsent(record.resourcePath, Q2Entry::new)
-                      .add(record.bytesTransferred, record.host);
-                    String q3Key = record.logDate + "|" + record.logHour;
-                    q3.computeIfAbsent(q3Key, k -> new Q3Entry(record.logDate, record.logHour))
-                      .add(record.statusCode, record.host);
+                    if (computeQ1) {
+                        String q1Key = record.logDate + "|" + record.statusCode;
+                        q1.computeIfAbsent(q1Key, k -> new Q1Entry(record.logDate, record.statusCode))
+                          .add(record.bytesTransferred);
+                    }
+                    if (computeQ2) {
+                        q2.computeIfAbsent(record.resourcePath, Q2Entry::new)
+                          .add(record.bytesTransferred, record.host);
+                    }
+                    if (computeQ3) {
+                        String q3Key = record.logDate + "|" + record.logHour;
+                        q3.computeIfAbsent(q3Key, k -> new Q3Entry(record.logDate, record.logHour))
+                          .add(record.statusCode, record.host);
+                    }
                 }
             }
         }
         List<Map<String, Object>> q1Rows = new ArrayList<>();
-        for (Q1Entry entry : q1.values()) {
-            q1Rows.add(entry.toMap());
+        if (computeQ1) {
+            for (Q1Entry entry : q1.values()) {
+                q1Rows.add(entry.toMap());
+            }
         }
-        List<Q2Entry> q2Entries = new ArrayList<>(q2.values());
-        q2Entries.sort(Comparator.comparingLong(Q2Entry::getRequestCount).reversed());
         List<Map<String, Object>> q2Rows = new ArrayList<>();
-        int rank = 1;
-        for (Q2Entry entry : q2Entries) {
-            if (rank > 20) break;
-            q2Rows.add(entry.toMap(rank));
-            rank++;
+        if (computeQ2) {
+            List<Q2Entry> q2Entries = new ArrayList<>(q2.values());
+            q2Entries.sort(Comparator.comparingLong(Q2Entry::getRequestCount).reversed());
+            int rank = 1;
+            for (Q2Entry entry : q2Entries) {
+                if (rank > 20) break;
+                q2Rows.add(entry.toMap(rank));
+                rank++;
+            }
         }
         List<Map<String, Object>> q3Rows = new ArrayList<>();
-        for (Q3Entry entry : q3.values()) {
-            q3Rows.add(entry.toMap());
+        if (computeQ3) {
+            for (Q3Entry entry : q3.values()) {
+                q3Rows.add(entry.toMap());
+            }
         }
         return new Result(q1Rows, q2Rows, q3Rows, totalRecords, malformedRecords, files.size());
     }

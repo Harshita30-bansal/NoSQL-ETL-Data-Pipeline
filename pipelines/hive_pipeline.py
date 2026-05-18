@@ -12,8 +12,9 @@ from src.base_pipeline import BasePipeline
 from config import HIVE_SCRIPTS_DIR
 class HivePipeline(BasePipeline):
     """Apache Hive-like pipeline implemented in Java."""
-    def __init__(self, data_file, batch_size=5000, db_type='postgresql'):
+    def __init__(self, data_file, batch_size=5000, db_type='postgresql' ,query_name='all'):
         super().__init__('Apache Hive', data_file, batch_size, db_type)
+        self.query_name = query_name
         self.data_files = data_file if isinstance(data_file, list) else [data_file]
         self.java_dir = os.path.join(HIVE_SCRIPTS_DIR, 'java_hive')
         self.java_source = os.path.join(self.java_dir, 'HiveAnalytics.java')
@@ -39,19 +40,25 @@ class HivePipeline(BasePipeline):
             q2_rows = result.get('q2', [])
             q3_rows = result.get('q3', [])
             self.total_records = result.get('total_records', 0)
-            self.malformed_records = result.get('malformed_records', 0)
+            self.malformed= result.get('malformed_records', 0)
             self.batch_count = result.get('batch_count', len(self.data_files))
             print(
                 f"  ✓ Java analytics returned {self.total_records:,} records "
-                f"({self.malformed_records:,} malformed)"
+                f"({self.malformed:,} malformed)"
             )
             elapsed_ms = int((time.time() - self.start_time) * 1000)
             execution_timestamp = datetime.now()
+           
             self.db_manager.insert_parent_result(
-                self.run_id, self.pipeline_name,
-                self.batch_count, self.batch_size,
-                self.total_records, self.malformed_records,
-                elapsed_ms, execution_timestamp,
+                run_id=self.run_id,
+                pipeline_name=self.pipeline_name,
+                query_name=self.query_name,
+                batch_count=self.batch_count,
+                batch_size=self.batch_size,
+                total_records=self.total_records,
+                malformed=self.malformed_records,
+                elapsed_ms=elapsed_ms,
+                execution_timestamp=execution_timestamp,
                 extra_json={"mode": "java_hive"},
             )
             self.db_manager.insert_daily_traffic_results(
@@ -87,7 +94,7 @@ class HivePipeline(BasePipeline):
         print("✓ Compiled Java Hive analytics")
         return True
     def _run_java_pipeline(self) -> dict:
-        java_args = ["java", "-cp", ".", self.java_class] + [
+        java_args = ["java", "-cp", ".", self.java_class , self.query_name] + [
             os.path.abspath(path) for path in self.data_files
         ]
         result = subprocess.run(
